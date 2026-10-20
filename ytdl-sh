@@ -26,6 +26,9 @@ COOKIES_BROWSER="${COOKIES_BROWSER:-}"
 RATE_LIMIT="${RATE_LIMIT:-}"
 NOTIFY_CMD="${NOTIFY_CMD:-}"
 
+# Dry-run flag (T2)
+DRY_RUN="${DRY_RUN:-false}"
+
 # ──────────────────────────────────────────────────────────────────────
 # UI HELPERS — Pure bash ANSI (cero deps)
 # ──────────────────────────────────────────────────────────────────────
@@ -202,6 +205,103 @@ trap_cleanup() {
 }
 
 # ──────────────────────────────────────────────────────────────────────
+# T2: BUILDERS — Format args y Output templates
+# ──────────────────────────────────────────────────────────────────────
+
+# Construye array de argumentos base para yt-dlp según preset
+# Retorna: array YTDLP_ARGS (global)
+build_format_args() {
+  local preset="${1:-$PRESET}"
+  local -a args=()
+
+  # Format sorting según preset
+  case "$preset" in
+    maxima)        args+=(-S "res,br") ;;
+    equilibrado)   args+=(-S "res:1080,br") ;;
+    compatibilidad) args+=(-S "ext:mp4:m4a,codec:h264:aac,res,br") ;;
+    minimo)        args+=(-S "+size,+br") ;;
+    av1opus)       args+=(-S "codec:av1:opus,res,br") ;;
+    custom)        # Se maneja fuera: usuario pasa su -S
+      ;;
+    *)             args+=(-S "res,br") ;;
+  esac
+
+  # Fallback implícito: bv*+ba/b (default yt-dlp) — NO usamos -f restrictivo
+  # Esto permite webm, mkv, mp4, lo que venga
+
+  # Post-procesado SIEMPRE activo
+  args+=(
+    --embed-metadata
+    --embed-thumbnail
+    --embed-chapters
+    --sponsorblock-mark all
+    --sponsorblock-remove "$SPONSORBLOCK_REMOVE"
+  )
+
+  # Subtítulos (stub siempre activo; menú interactivo en T6)
+  if [[ -n "$SUB_LANGS" ]]; then
+    args+=(--write-subs --embed-subs --sub-lang "$SUB_LANGS")
+  fi
+
+  # Archive persistente
+  args+=(--download-archive "$ARCHIVE_FILE")
+
+  # Red y resiliencia
+  args+=(
+    --socket-timeout 60
+    --retries 20
+    --fragment-retries 20
+    -N 4
+    --concurrent-fragments 4
+  )
+
+  # Comportamiento playlist/errores
+  args+=(--ignore-errors --no-abort-on-error)
+
+  # Output progreso
+  args+=(--newline --progress)
+
+  # Proxy / cookies / rate limit (si configurados)
+  [[ -n "$PROXY" ]] && args+=(--proxy "$PROXY")
+  [[ -n "$COOKIES_BROWSER" ]] && args+=(--cookies-from-browser "$COOKIES_BROWSER")
+  [[ -n "$RATE_LIMIT" ]] && args+=(--throttled-rate "$RATE_LIMIT")
+
+  # Dry-run
+  if [[ "$DRY_RUN" == "true" ]]; then
+    args+=(--simulate --print-json)
+  fi
+
+  # Exportar como array global
+  YTDLP_ARGS=("${args[@]}")
+}
+
+# Retorna template de salida según modo
+# Uso: template=$(build_output_template "video" "$outdir")
+build_output_template() {
+  local mode="$1"
+  local outdir="${2:-$OUTDIR}"
+
+  case "$mode" in
+    video|audio)
+      printf '%s/%s' "$outdir" '%(title)s [%(id)s].%(ext)s'
+      ;;
+    playlist)
+      printf '%s/%s' "$outdir" '%(playlist_title)s/%(playlist_index)03d - %(title)s [%(id)s].%(ext)s'
+      ;;
+    channel)
+      printf '%s/%s' "$outdir" '%(uploader)s/%(upload_date>%Y-%m-%d)s - %(title)s [%(id)s].%(ext)s'
+      ;;
+    custom)
+      # Custom: usuario define en ask()
+      printf '%s' "$outdir"
+      ;;
+    *)
+      printf '%s/%s' "$outdir" '%(title)s [%(id)s].%(ext)s'
+      ;;
+  esac
+}
+
+# ──────────────────────────────────────────────────────────────────────
 # MODO: VIDEO
 # ──────────────────────────────────────────────────────────────────────
 mode_video() {
@@ -229,10 +329,20 @@ mode_video() {
     return 0
   fi
 
-  # T2/T3: construir comando yt-dlp real
-  info "Descargando... (stub T1 — T2/T3 implementarán comando real)"
-  sleep 1
-  ok "Simulación completada (T1 stub)"
+  # Construir args y ejecutar
+  build_format_args "$PRESET"
+  local template
+  template=$(build_output_template "video" "$outdir")
+
+  info "Iniciando descarga con yt-dlp..."
+  yt-dlp "${YTDLP_ARGS[@]}" -o "$template" "$url"
+  local exit_code=$?
+
+  if (( exit_code == 0 )); then
+    ok "Descarga completada"
+  else
+    warn "yt-dlp terminó con código $exit_code"
+  fi
 }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -259,9 +369,20 @@ mode_audio() {
     return 0
   fi
 
-  info "Descargando... (stub T1)"
-  sleep 1
-  ok "Simulación completada (T1 stub)"
+  build_format_args "$PRESET"
+  local template
+  template=$(build_output_template "audio" "$outdir")
+
+  info "Iniciando extracción de audio con yt-dlp..."
+  # -x extrae audio SIN --audio-format → mantiene contenedor original (opus/m4a/webm/flac)
+  yt-dlp "${YTDLP_ARGS[@]}" -x -o "$template" "$url"
+  local exit_code=$?
+
+  if (( exit_code == 0 )); then
+    ok "Extracción de audio completada"
+  else
+    warn "yt-dlp terminó con código $exit_code"
+  fi
 }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -295,9 +416,23 @@ mode_playlist() {
     return 0
   fi
 
-  info "Descargando... (stub T1)"
-  sleep 1
-  ok "Simulación completada (T1 stub)"
+  build_format_args "$PRESET"
+  local template
+  template=$(build_output_template "playlist" "$outdir")
+
+  # Construir --playlist-items
+  local playlist_items="${start}-"
+  [[ -n "$end" ]] && playlist_items="${start}-${end}"
+
+  info "Iniciando descarga de playlist con yt-dlp..."
+  yt-dlp "${YTDLP_ARGS[@]}" --playlist-items "$playlist_items" -o "$template" "$url"
+  local exit_code=$?
+
+  if (( exit_code == 0 )); then
+    ok "Playlist completada"
+  else
+    warn "yt-dlp terminó con código $exit_code"
+  fi
 }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -324,9 +459,19 @@ mode_channel() {
     return 0
   fi
 
-  info "Descargando... (stub T1)"
-  sleep 1
-  ok "Simulación completada (T1 stub)"
+  build_format_args "$PRESET"
+  local template
+  template=$(build_output_template "channel" "$outdir")
+
+  info "Iniciando descarga de canal con yt-dlp..."
+  yt-dlp "${YTDLP_ARGS[@]}" -o "$template" "$url"
+  local exit_code=$?
+
+  if (( exit_code == 0 )); then
+    ok "Canal completado"
+  else
+    warn "yt-dlp terminó con código $exit_code"
+  fi
 }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -338,12 +483,18 @@ mode_custom() {
   url=$(ask "URL (video, playlist, canal, lo que sea)")
   [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
 
-  local extra_flags
-  extra_flags=$(ask "Flags extra para yt-dlp (ej: --proxy socks5://... --cookies-from-browser firefox)" "")
+  # Leer flags extra como array (expansión segura)
+  local -a extra_flags=()
+  local extra_input
+  extra_input=$(ask "Flags extra para yt-dlp (ej: --proxy socks5://... --cookies-from-browser firefox)" "")
+  if [[ -n "$extra_input" ]]; then
+    # shellcheck disable=SC2206
+    extra_flags=($extra_input)
+  fi
 
   print_header "CONFIRMACIÓN — Custom"
   printf "  URL:        %s\n" "$url"
-  printf "  Flags:      %s\n" "${extra_flags:-(ninguno)}"
+  printf "  Flags:      %s\n" "${extra_flags[*]-(ninguno)}"
   printf "  Archive:    ✓\n"
   echo
 
@@ -352,9 +503,19 @@ mode_custom() {
     return 0
   fi
 
-  info "Ejecutando... (stub T1)"
-  sleep 1
-  ok "Simulación completada (T1 stub)"
+  build_format_args "$PRESET"
+  local template
+  template=$(build_output_template "custom" "$OUTDIR")
+
+  info "Ejecutando yt-dlp con flags personalizados..."
+  yt-dlp "${YTDLP_ARGS[@]}" "${extra_flags[@]}" -o "$template" "$url"
+  local exit_code=$?
+
+  if (( exit_code == 0 )); then
+    ok "Ejecución completada"
+  else
+    warn "yt-dlp terminó con código $exit_code"
+  fi
 }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -551,6 +712,28 @@ main_menu() {
 # ENTRY POINT
 # ──────────────────────────────────────────────────────────────────────
 main() {
+  # Parsear flags globales
+  while (( $# > 0 )); do
+    case "$1" in
+      -n|--dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+      -h|--help)
+        help_screen
+        exit 0
+        ;;
+      -v|--version)
+        printf "%s v%s\n" "$SCRIPT_NAME" "$VERSION"
+        exit 0
+        ;;
+      *)
+        # Ignorar flags desconocidos (para futuras extensiones)
+        shift
+        ;;
+    esac
+  done
+
   # Inicialización básica
   init_config_dirs
   load_config

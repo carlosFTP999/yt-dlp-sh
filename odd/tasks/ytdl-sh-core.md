@@ -73,8 +73,8 @@
 
 | ID | Specs | Route | Description | Commit | Status |
 |----|-------|-------|-------------|--------|--------|
-| T1 | S1.1-S1.5, S9 | inline | Menú principal + 5 modos + UI `choose()`/`ask()` | `feat(core): main menu and 5 download modes` | ✅ Approved — Implementing |
-| T2 | S2, S6 | inline | Format sorting `-S "res,br"` + templates por modo + `%(ext)s` | `feat(core): format sorting and output templates` | ⏳ Pending |
+| T1 | S1.1-S1.5, S9 | inline | Menú principal + 5 modos + UI `choose()`/`ask()` | `feat(core): main menu and 5 download modes` | ✅ Done (commit 1cef9a0) |
+| T2 | S2, S6 | inline | Format sorting `-S "res,br"` + templates por modo + `%(ext)s` | `feat(core): format sorting and output templates` | ✅ Approved — Implementing |
 | T3 | S3, S4 | inline | Post-procesado yt-dlp (embed metadata/thumb/chapters/sponsorblock) + red defaults | `feat(core): yt-dlp post-processing and network defaults` | ⏳ Pending |
 | T4 | S5 | inline | Validación pre-vuelo (deps, red, disco) | `feat(core): pre-flight validation` | ⏳ Pending |
 | T5 | S7 | inline | Dry-run flag (`-n`/`--dry-run`) | `feat(core): dry-run simulation` | ⏳ Pending |
@@ -100,6 +100,12 @@
 
 ### L5 — 2026-10-20 — T1 Aprobado (Usuario)
 > T1 aprobado sin cambios: menú principal + 5 modos + queue + settings + help, UI pure bash ANSI `choose()`/`ask()`, stubs para T4/T6/T7, español voseo default, colores `tput` auto, confirmación antes de ejecutar. Commit: `feat(core): main menu and 5 download modes`.
+
+### L6 — 2026-10-20 — T1 Completado (Orchestrator)
+> Implementado y commiteado T1 (commit 1cef9a0): menú principal navegable con flechas ANSI, 5 modos (video, audio, playlist, channel, custom) + queue + settings + help. UI pure bash con choose()/ask()/confirm(). Stubs para T4/T6/T7. Config dirs auto-creados. Colores tput con fallback. Español voseo default. Commits en feature/ytdl-sh-core.
+
+### L7 — 2026-10-20 — T2 Aprobado (Usuario)
+> T2 aprobado: Format sorting `-S "res,br"` + templates por modo + integración real yt-dlp en 5 modos. Énfasis: **playlists de YouTube deben funcionar correctamente**. Subtítulos stub siempre activo (menú en T6). Audio `-x` sin `--audio-format` (contenedor original). Playlist range `--playlist-items "$start-$end"`. Custom flags array seguro. Dry-run pasa `--simulate --print-json`. Commit: `feat(core): format sorting and output templates`.
 
 ---
 
