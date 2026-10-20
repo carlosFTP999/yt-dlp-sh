@@ -1,0 +1,574 @@
+#!/usr/bin/env bash
+# ytdl-sh — Interactive yt-dlp + ffmpeg downloader (single file, zero deps)
+# Fase 1: Core sólido — T1: Menú principal + 5 modos + UI
+set -euo pipefail
+IFS=$'\n\t'
+
+# ──────────────────────────────────────────────────────────────────────
+# CONSTANTES Y DEFAULTS
+# ──────────────────────────────────────────────────────────────────────
+readonly SCRIPT_NAME="ytdl-sh"
+readonly VERSION="1.0.0-core"
+readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ytdl-sh"
+readonly ARCHIVE_FILE="$CONFIG_DIR/archive.txt"
+readonly HISTORY_FILE="$CONFIG_DIR/history.jsonl"
+readonly QUEUE_FILE="$CONFIG_DIR/queue.jsonl"
+readonly CONFIG_FILE="$CONFIG_DIR/config"
+
+# Defaults (pueden sobreescribirse por config file)
+OUTDIR="${OUTDIR:-$HOME/Descargas}"
+PRESET="${PRESET:-maxima}"
+PARALLEL="${PARALLEL:-1}"
+SUB_LANGS="${SUB_LANGS:-es,en}"
+SPONSORBLOCK_REMOVE="${SPONSORBLOCK_REMOVE:-sponsor,selfpromo,interaction}"
+PROXY="${PROXY:-}"
+COOKIES_BROWSER="${COOKIES_BROWSER:-}"
+RATE_LIMIT="${RATE_LIMIT:-}"
+NOTIFY_CMD="${NOTIFY_CMD:-}"
+
+# ──────────────────────────────────────────────────────────────────────
+# UI HELPERS — Pure bash ANSI (cero deps)
+# ──────────────────────────────────────────────────────────────────────
+
+# Detectar capacidades de terminal
+if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
+  readonly HAS_TPUT=1
+  readonly BOLD="$(tput bold 2>/dev/null || echo '')"
+  readonly DIM="$(tput dim 2>/dev/null || echo '')"
+  readonly RED="$(tput setaf 1 2>/dev/null || echo '')"
+  readonly GREEN="$(tput setaf 2 2>/dev/null || echo '')"
+  readonly YELLOW="$(tput setaf 3 2>/dev/null || echo '')"
+  readonly BLUE="$(tput setaf 4 2>/dev/null || echo '')"
+  readonly CYAN="$(tput setaf 6 2>/dev/null || echo '')"
+  readonly RESET="$(tput sgr0 2>/dev/null || echo '')"
+  readonly CLEAR_LINE="$(tput el 2>/dev/null || echo '')"
+else
+  readonly HAS_TPUT=0
+  readonly BOLD="" DIM="" RED="" GREEN="" YELLOW="" BLUE="" CYAN="" RESET="" CLEAR_LINE=""
+fi
+
+# Helpers de salida
+die() { printf "%b\n" "${RED}✘${RESET} $*" >&2; exit 1; }
+ok()   { printf "%b\n" "${GREEN}✔${RESET} $*"; }
+info() { printf "%b\n" "${BLUE}ℹ${RESET} $*"; }
+warn() { printf "%b\n" "${YELLOW}⚠${RESET} $*"; }
+dim()  { printf "%b\n" "${DIM}$*${RESET}"; }
+
+# Header visual
+print_header() {
+  local title="$1"
+  local width=60
+  printf "\n%b%*s%b\n" "${BOLD}${CYAN}" "$width" "" "${RESET}"
+  printf "%b %-*s %b\n" "${BOLD}${CYAN}" "$((width - 2))" "$title" "${RESET}"
+  printf "%b%*s%b\n\n" "${BOLD}${CYAN}" "$width" "" "${RESET}"
+}
+
+# Menú navegable con flechas (ANSI)
+# Uso: choose "Prompt" "opt1" "desc1" "opt2" "desc2" ...
+# Retorna: option seleccionada (stdout)
+choose() {
+  local prompt="$1"; shift
+  local -a opts=("$@")
+  local -i n_choices=$(( ${#opts[@]} / 2 ))
+  local -i sel=0
+  local key
+
+  # Ocultar cursor
+  [[ $HAS_TPUT -eq 1 ]] && tput civis 2>/dev/null
+
+  while true; do
+    clear
+    print_header "$prompt"
+    for ((i=0; i<${#opts[@]}; i+=2)); do
+      local idx=$((i/2))
+      if (( idx == sel )); then
+        printf "  ${CYAN}▸ %s${RESET} — %s\n" "${opts[i]}" "${opts[i+1]}"
+      else
+        printf "    %s — %s\n" "${opts[i]}" "${opts[i+1]}"
+      fi
+    done
+    printf "\n  ${DIM}↑/↓ navegar · Enter seleccionar · Esc cancelar${RESET}\n"
+
+    IFS= read -rsn1 key
+    case "$key" in
+      $'\x1b')
+        # Leer siguiente byte para distinguir ESC solo vs secuencia
+        IFS= read -rsn1 -t 0.001 key2
+        if [[ -z "$key2" ]]; then
+          # ESC presionado solo → cancelar
+          [[ $HAS_TPUT -eq 1 ]] && tput cnorm 2>/dev/null
+          return 1
+        fi
+        IFS= read -rsn1 -t 0.001 key3
+        case "${key2}${key3}" in
+          '[A') (( sel > 0 )) && ((sel--)) ;;
+          '[B') (( sel < n_choices - 1 )) && ((sel++)) ;;
+        esac
+        ;;
+      '') # Enter
+        [[ $HAS_TPUT -eq 1 ]] && tput cnorm 2>/dev/null
+        printf '%s' "${opts[sel*2]}"
+        return 0
+        ;;
+      $'\x03') # Ctrl+C
+        [[ $HAS_TPUT -eq 1 ]] && tput cnorm 2>/dev/null
+        die "Cancelado por usuario"
+        ;;
+    esac
+  done
+}
+
+# Input libre con prompt
+# Uso: ask "Prompt" [default]
+# Retorna: input (stdout)
+ask() {
+  local prompt="$1"
+  local default="${2:-}"
+  local input
+
+  if [[ -n "$default" ]]; then
+    read -rp "$(printf "%b" "${BLUE}?${RESET} $prompt ${DIM}[$default]${RESET} ")" input
+    printf '%s' "${input:-$default}"
+  else
+    read -rp "$(printf "%b" "${BLUE}?${RESET} $prompt ")" input
+    printf '%s' "$input"
+  fi
+}
+
+# Confirmación sí/no
+# Uso: confirm "Prompt" [default_y/n]
+# Retorna: 0=sí, 1=no
+confirm() {
+  local prompt="$1"
+  local default="${2:-y}"
+  local yn
+
+  while true; do
+    if [[ "$default" == "y" ]]; then
+      read -rp "$(printf "%b" "${BLUE}?${RESET} $prompt ${DIM}[Y/n]${RESET} ")" yn
+      yn="${yn:-y}"
+    else
+      read -rp "$(printf "%b" "${BLUE}?${RESET} $prompt ${DIM}[y/N]${RESET} ")" yn
+      yn="${yn:-n}"
+    fi
+    case "${yn,,}" in
+      y|yes|s|si|sí) return 0 ;;
+      n|no) return 1 ;;
+      *) warn "Respuesta inválida: y/sí o n/no" ;;
+    esac
+  done
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# STUBS — Para ser implementados en T4, T6, T7
+# ──────────────────────────────────────────────────────────────────────
+
+init_config_dirs() {
+  mkdir -p "$CONFIG_DIR"
+  [[ -f "$CONFIG_FILE" ]] || touch "$CONFIG_FILE"
+  [[ -f "$ARCHIVE_FILE" ]] || touch "$ARCHIVE_FILE"
+  [[ -f "$HISTORY_FILE" ]] || touch "$HISTORY_FILE"
+  [[ -f "$QUEUE_FILE" ]] || touch "$QUEUE_FILE"
+}
+
+load_config() {
+  # T6: leer key=value de $CONFIG_FILE
+  # Por ahora: no-op
+  :
+}
+
+check_dependencies() {
+  # T4: verificar yt-dlp, ffmpeg, curl
+  # Por ahora: asumir presentes
+  return 0
+}
+
+save_queue() {
+  # T7: persistir queue array a $QUEUE_FILE (JSONL)
+  # Por ahora: no-op
+  :
+}
+
+load_queue() {
+  # T7: cargar queue array desde $QUEUE_FILE
+  # Por ahora: array vacío
+  QUEUE=()
+}
+
+trap_cleanup() {
+  # T7: limpiar temp dirs, guardar queue state
+  # Por ahora: no-op
+  :
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# MODO: VIDEO
+# ──────────────────────────────────────────────────────────────────────
+mode_video() {
+  print_header "MODO VIDEO — Video único (mejor calidad nativa)"
+  local url
+  url=$(ask "URL del video")
+  [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+
+  local outdir
+  outdir=$(ask "Directorio de salida" "$OUTDIR")
+
+  # Confirmación con resumen
+  print_header "CONFIRMACIÓN — Video"
+  printf "  URL:        %s\n" "$url"
+  printf "  Salida:     %s\n" "$outdir"
+  printf "  Preset:     %s (-S \"res,br\")\n" "$PRESET"
+  printf "  Formato:    Contenedor original (webm/mkv/mp4...)\n"
+  printf "  Subs:       %s (embed)\n" "$SUB_LANGS"
+  printf "  SponsorBlock: mark all + remove %s\n" "$SPONSORBLOCK_REMOVE"
+  printf "  Archive:    ✓\n"
+  echo
+
+  if ! confirm "¿Ejecutar descarga?"; then
+    info "Cancelado"
+    return 0
+  fi
+
+  # T2/T3: construir comando yt-dlp real
+  info "Descargando... (stub T1 — T2/T3 implementarán comando real)"
+  sleep 1
+  ok "Simulación completada (T1 stub)"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# MODO: AUDIO
+# ──────────────────────────────────────────────────────────────────────
+mode_audio() {
+  print_header "MODO AUDIO — Solo audio (mejor calidad original)"
+  local url
+  url=$(ask "URL del video")
+  [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+
+  local outdir
+  outdir=$(ask "Directorio de salida" "$OUTDIR")
+
+  print_header "CONFIRMACIÓN — Audio"
+  printf "  URL:        %s\n" "$url"
+  printf "  Salida:     %s\n" "$outdir"
+  printf "  Formato:    Original (opus/m4a/webm/flac...) — sin reconversión\n"
+  printf "  Archive:    ✓\n"
+  echo
+
+  if ! confirm "¿Ejecutar descarga?"; then
+    info "Cancelado"
+    return 0
+  fi
+
+  info "Descargando... (stub T1)"
+  sleep 1
+  ok "Simulación completada (T1 stub)"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# MODO: PLAYLIST
+# ──────────────────────────────────────────────────────────────────────
+mode_playlist() {
+  print_header "MODO PLAYLIST — Lista completa o rango"
+  local url
+  url=$(ask "URL de la playlist")
+  [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+
+  local start end
+  start=$(ask "Video inicial (1 = primero)" "1")
+  end=$(ask "Video final (vacío = hasta el final)" "")
+
+  local outdir
+  outdir=$(ask "Directorio base de salida" "$OUTDIR")
+
+  print_header "CONFIRMACIÓN — Playlist"
+  printf "  URL:        %s\n" "$url"
+  printf "  Rango:      %s-%s\n" "$start" "${end:-fin}"
+  printf "  Salida:     %s/<playlist_title>/\n" "$outdir"
+  printf "  Template:   %%(playlist_index)03d - %%(title)s [%%(id)s].%%(ext)s\n"
+  printf "  Preset:     %s\n" "$PRESET"
+  printf "  Subs:       %s (embed)\n" "$SUB_LANGS"
+  printf "  Archive:    ✓\n"
+  echo
+
+  if ! confirm "¿Ejecutar descarga?"; then
+    info "Cancelado"
+    return 0
+  fi
+
+  info "Descargando... (stub T1)"
+  sleep 1
+  ok "Simulación completada (T1 stub)"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# MODO: CANAL
+# ──────────────────────────────────────────────────────────────────────
+mode_channel() {
+  print_header "MODO CANAL — Canal completo (videos + shorts + lives)"
+  local url
+  url=$(ask "URL del canal (@handle o /c/ o /channel/)")
+  [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+
+  local outdir
+  outdir=$(ask "Directorio base de salida" "$OUTDIR")
+
+  print_header "CONFIRMACIÓN — Canal"
+  printf "  URL:        %s\n" "$url"
+  printf "  Salida:     %s/<uploader>/%%(upload_date>%%Y-%%m-%%d)s - %%(title)s [%%(id)s].%%(ext)s\n" "$outdir"
+  printf "  Preset:     %s\n" "$PRESET"
+  printf "  Archive:    ✓\n"
+  echo
+
+  if ! confirm "¿Ejecutar descarga?"; then
+    info "Cancelado"
+    return 0
+  fi
+
+  info "Descargando... (stub T1)"
+  sleep 1
+  ok "Simulación completada (T1 stub)"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# MODO: CUSTOM
+# ──────────────────────────────────────────────────────────────────────
+mode_custom() {
+  print_header "MODO CUSTOM — URL + flags manuales"
+  local url
+  url=$(ask "URL (video, playlist, canal, lo que sea)")
+  [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+
+  local extra_flags
+  extra_flags=$(ask "Flags extra para yt-dlp (ej: --proxy socks5://... --cookies-from-browser firefox)" "")
+
+  print_header "CONFIRMACIÓN — Custom"
+  printf "  URL:        %s\n" "$url"
+  printf "  Flags:      %s\n" "${extra_flags:-(ninguno)}"
+  printf "  Archive:    ✓\n"
+  echo
+
+  if ! confirm "¿Ejecutar descarga?"; then
+    info "Cancelado"
+    return 0
+  fi
+
+  info "Ejecutando... (stub T1)"
+  sleep 1
+  ok "Simulación completada (T1 stub)"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# QUEUE MENU
+# ──────────────────────────────────────────────────────────────────────
+queue_menu() {
+  load_queue
+  while true; do
+    print_header "COLA DE DESCARGAS (${#QUEUE[@]} items)"
+    local choice
+    choice=$(choose "Acciones de cola" \
+      "add"      "Añadir URL a la cola" \
+      "list"     "Listar items pendientes/completados/fallados" \
+      "process"  "Procesar cola (secuencial)" \
+      "clear"    "Limpiar cola (solo pendientes)" \
+      "back"     "Volver al menú principal")
+    case "$choice" in
+      add)    queue_add ;;
+      list)   queue_list ;;
+      process) queue_process ;;
+      clear)  queue_clear ;;
+      back|*) return ;;
+    esac
+  done
+}
+
+queue_add() {
+  print_header "AÑADIR A COLA"
+  local url mode preset
+  url=$(ask "URL")
+  [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+
+  mode=$(choose "Modo" \
+    "video"   "Video único" \
+    "audio"   "Solo audio" \
+    "playlist" "Playlist" \
+    "channel" "Canal" \
+    "custom"  "Custom flags")
+  preset=$(choose "Preset de calidad" \
+    "maxima"       "res,br (mejor calidad nativa)" \
+    "equilibrado"  "res:1080,br (cap 1080p)" \
+    "compatibilidad" "ext:mp4:m4a,codec:h264:aac,res,br" \
+    "minimo"       "+size,+br (menor tamaño)" \
+    "av1opus"      "codec:av1:opus,res,br" \
+    "custom"       "Escribir -S personalizado")
+
+  local item
+  item=$(printf '{"id":"q_%s","url":"%s","mode":"%s","preset":"%s","status":"pending"}' \
+    "$(date +%s%N)" "$url" "$mode" "$preset")
+  QUEUE+=("$item")
+  save_queue
+  ok "Añadido a cola (pos ${#QUEUE[@]})"
+}
+
+queue_list() {
+  print_header "LISTA DE COLA"
+  if (( ${#QUEUE[@]} == 0 )); then
+    info "Cola vacía"
+    return
+  fi
+  local i=1
+  for item in "${QUEUE[@]}"; do
+    local id mode preset status
+    id=$(echo "$item" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+    mode=$(echo "$item" | sed -n 's/.*"mode":"\([^"]*\)".*/\1/p')
+    preset=$(echo "$item" | sed -n 's/.*"preset":"\([^"]*\)".*/\1/p')
+    status=$(echo "$item" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+    printf "  %2d. [%s] %s | %s | %s\n" "$i" "$status" "$mode" "$preset" "$id"
+    ((i++))
+  done
+  ask "Presiona Enter para continuar" "" >/dev/null
+}
+
+queue_process() {
+  print_header "PROCESAR COLA (secuencial)"
+  if (( ${#QUEUE[@]} == 0 )); then
+    info "Cola vacía"
+    return
+  fi
+  warn "T7 implementará procesamiento real con yt-dlp"
+  info "Por ahora: simulación"
+  for item in "${QUEUE[@]}"; do
+    local id mode
+    id=$(echo "$item" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+    mode=$(echo "$item" | sed -n 's/.*"mode":"\([^"]*\)".*/\1/p')
+    printf "  → Procesando %s (%s)...\n" "$id" "$mode"
+    sleep 0.5
+  done
+  ok "Cola procesada (simulación)"
+  ask "Presiona Enter para continuar" "" >/dev/null
+}
+
+queue_clear() {
+  if confirm "¿Limpiar TODOS los items pendientes?"; then
+    QUEUE=()
+    save_queue
+    ok "Cola limpiada"
+  fi
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# SETTINGS / HELP
+# ──────────────────────────────────────────────────────────────────────
+settings_menu() {
+  print_header "AJUSTES (Fase 1 — Solo lugar reservado)"
+  info "Configuración persistente se implementa en T6"
+  info "Archivo: $CONFIG_FILE"
+  info "Formato: key=value (ej: OUTDIR=/ruta, PRESET=maxima)"
+  ask "Presiona Enter para volver" "" >/dev/null
+}
+
+help_screen() {
+  print_header "AYUDA — $SCRIPT_NAME v$VERSION"
+  cat <<'EOF'
+NAVEGACIÓN
+  ↑/↓       Navegar opciones
+  Enter     Seleccionar
+  Esc       Cancelar / Volver
+  Ctrl+C    Salir del programa
+
+MODOS
+  Video     Video único — mejor calidad nativa (contenedor original)
+  Audio     Solo audio — mejor calidad original (sin reconversión)
+  Playlist  Lista completa o rango N-M — carpeta con índice
+  Canal     Canal completo (videos + shorts + lives) — por fecha
+  Custom    URL + flags manuales de yt-dlp
+  Cola      Gestionar múltiples descargas (añadir/listar/procesar)
+
+PRESETS DE CALIDAD (Fase 2)
+  Máxima        -S "res,br"
+  Equilibrado   -S "res:1080,br"
+  Compatibilidad-S "ext:mp4:m4a,codec:h264:aac,res,br"
+  Mínimo        -S "+size,+br"
+  AV1/Opus      -S "codec:av1:opus,res,br"
+
+CARACTERÍSTICAS SIEMPRE ACTIVAS
+  • SponsorBlock: mark all + remove (sponsor, selfpromo, interaction)
+  • Metadatos + thumbnail + capítulos embebidos
+  • Subtítulos opcionales (es,en) — write + embed
+  • Archive persistente — no re-descarga
+  • Formato sorting moderno (-S) — sin -f restrictivo
+
+CONFIGURACIÓN
+  Archivo: ~/.config/ytdl-sh/config (key=value)
+  Ejemplo:
+    OUTDIR=/home/user/Descargas
+    PRESET=maxima
+    SUB_LANGS=es,en
+
+ATRIBUTOS
+  yt-dlp + ffmpeg requeridos en PATH
+  bash 4.4+ recomendado (macOS: brew install bash)
+
+EOF
+  ask "Presiona Enter para volver" "" >/dev/null
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# MAIN MENU
+# ──────────────────────────────────────────────────────────────────────
+main_menu() {
+  while true; do
+    clear
+    print_header "$SCRIPT_NAME v$VERSION"
+    dim "Interactive yt-dlp + ffmpeg downloader — cero dependencias"
+
+    local choice
+    choice=$(choose "Selecciona modo" \
+      "video"    "Video único (mejor calidad nativa)" \
+      "audio"    "Solo audio (mejor calidad original)" \
+      "playlist" "Playlist completa o rango N-M" \
+      "channel"  "Canal completo (videos + shorts + lives)" \
+      "custom"   "URL + flags manuales de yt-dlp" \
+      "queue"    "Cola de descargas (añadir/listar/procesar)" \
+      "settings" "Ajustes y configuración" \
+      "help"     "Ayuda y atajos" \
+      "exit"     "Salir")
+
+    case "$choice" in
+      video)    mode_video ;;
+      audio)    mode_audio ;;
+      playlist) mode_playlist ;;
+      channel)  mode_channel ;;
+      custom)   mode_custom ;;
+      queue)    queue_menu ;;
+      settings) settings_menu ;;
+      help)     help_screen ;;
+      exit)     return 0 ;;
+    esac
+  done
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# ENTRY POINT
+# ──────────────────────────────────────────────────────────────────────
+main() {
+  # Inicialización básica
+  init_config_dirs
+  load_config
+  check_dependencies
+
+  # Traps (T7 implementará cleanup real)
+  trap 'trap_cleanup; exit 130' INT
+  trap 'trap_cleanup; exit 143' TERM
+
+  # Ejecutar menú principal
+  main_menu
+
+  # Limpieza final
+  trap_cleanup
+  printf "\n%b¡Hasta la próxima!%b\n" "${GREEN}" "${RESET}"
+}
+
+# Ejecutar si no está siendo sourceado
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
