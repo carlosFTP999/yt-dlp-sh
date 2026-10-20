@@ -220,6 +220,94 @@ save_config() {
   ok "Configuración guardada en $CONFIG_FILE"
 }
 
+# ──────────────────────────────────────────────────────────────────────
+# T7: JSONL HELPERS — Pure bash JSON parsing (sin jq)
+# ──────────────────────────────────────────────────────────────────────
+
+# Escapar string para JSON (básico: \, ", newline, tab, carriage return)
+json_escape() {
+  local str="$1"
+  str="${str//\\/\\\\}"  # \ → \\
+  str="${str//\"/\\\"}"  # " → \"
+  str="${str//$'\n'/\\n}" # newline → \n
+  str="${str//$'\t'/\\t}" # tab → \t
+  str="${str//$'\r'/\\r}" # carriage return → \r
+  printf '%s' "$str"
+}
+
+# Validar línea JSONL básica (sin jq)
+# Retorna 0 si parece JSON válido, 1 si no
+is_valid_json() {
+  local line="$1"
+  [[ -z "$line" ]] && return 1
+  # Debe empezar con { y terminar con }
+  [[ "$line" =~ ^\{.*\}$ ]] || return 1
+  # Llaves balanceadas (básico)
+  local open close
+  open=$(grep -o '{' <<<"$line" | wc -l)
+  close=$(grep -o '}' <<<"$line" | wc -l)
+  (( open == close )) || return 1
+  # Comillas balanceadas (aprox)
+  local quotes
+  quotes=$(grep -o '"' <<<"$line" | wc -l)
+  (( quotes % 2 == 0 )) || return 1
+  return 0
+}
+
+# Extraer valor de campo simple (string) de JSON
+# Uso: json_get "$line" "id"
+json_get() {
+  local json="$1"
+  local key="$2"
+  # Busca "key":"value" o "key": "value" (escapa comillas en value)
+  local val
+  val=$(sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" <<<"$json")
+  printf '%s' "$val"
+}
+
+# Extraer valor de campo que puede ser string, number, bool, null, object
+# Retorna el valor raw (sin comillas si es string)
+json_get_raw() {
+  local json="$1"
+  local key="$2"
+  # Captura todo entre : y , o } (incluye strings, numbers, true, false, null, objects)
+  local val
+  val=$(sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p" <<<"$json" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  printf '%s' "$val"
+}
+
+# Construir JSON para queue item
+# Uso: json_build_queue_item "id" "url" "mode" "preset" '{"start":"1","end":"50"}' "status" "created" ["started"] ["finished"] ["error"]
+json_build_queue_item() {
+  local id="$1" url="$2" mode="$3" preset="$4" options="$5" status="$6" created="$7" started="${8:-}" finished="${9:-}" error="${10:-}"
+  local item
+  item=$(printf '{"id":"%s","url":"%s","mode":"%s","preset":"%s","options":%s,"status":"%s"' \
+    "$(json_escape "$id")" \
+    "$(json_escape "$url")" \
+    "$(json_escape "$mode")" \
+    "$(json_escape "$preset")" \
+    "$options" \
+    "$(json_escape "$status")")
+  [[ -n "$created" ]] && item="${item},\"created\":\"$(json_escape "$created")\""
+  [[ -n "$started" ]] && item="${item},\"started\":\"$(json_escape "$started")\""
+  [[ -n "$finished" ]] && item="${item},\"finished\":\"$(json_escape "$finished")\""
+  [[ -n "$error" ]] && item="${item},\"error\":\"$(json_escape "$error")\""
+  item="${item}}"
+  printf '%s' "$item"
+}
+
+# Array para temp dirs (cleanup en trap)
+TEMP_DIRS=()
+
+# Registrar temp dir para cleanup automático
+register_temp_dir() {
+  TEMP_DIRS+=("$1")
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# CHECK DEPENDENCIES
+# ──────────────────────────────────────────────────────────────────────
+
 check_dependencies() {
   # yt-dlp
   command -v yt-dlp >/dev/null || die "yt-dlp no encontrado. Instala: pipx install yt-dlp / brew install yt-dlp / apt install yt-dlp"
@@ -281,15 +369,31 @@ preflight_checks() {
 }
 
 load_queue() {
-  # T7: cargar queue array desde $QUEUE_FILE
-  # Por ahora: array vacío
   QUEUE=()
+  [[ -f "$QUEUE_FILE" ]] || return 0
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if is_valid_json "$line"; then
+      QUEUE+=("$line")
+    else
+      warn "Línea inválida en queue (skip): ${line:0:80}..."
+    fi
+  done < "$QUEUE_FILE"
+}
+
+# Guardar queue (atómico: temp + mv)
+save_queue() {
+  local tmp
+  tmp=$(mktemp "${QUEUE_FILE}.XXXXXX") || die "No se pudo crear temp file"
+  printf '%s\n' "${QUEUE[@]}" > "$tmp" && mv "$tmp" "$QUEUE_FILE"
 }
 
 trap_cleanup() {
-  # T7: limpiar temp dirs, guardar queue state
-  # Por ahora: no-op
-  :
+  save_queue
+  for dir in "${TEMP_DIRS[@]}"; do
+    [[ -d "$dir" ]] && rm -rf "$dir"
+  done
+  [[ $HAS_TPUT -eq 1 ]] && tput cnorm 2>/dev/null
 }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -621,17 +725,19 @@ queue_menu() {
     print_header "COLA DE DESCARGAS (${#QUEUE[@]} items)"
     local choice
     choice=$(choose "Acciones de cola" \
-      "add"      "Añadir URL a la cola" \
-      "list"     "Listar items pendientes/completados/fallados" \
-      "process"  "Procesar cola (secuencial)" \
-      "clear"    "Limpiar cola (solo pendientes)" \
-      "back"     "Volver al menú principal")
+      "add"       "Añadir URL a la cola" \
+      "list"      "Listar items pendientes/completados/fallados" \
+      "process"   "Procesar cola (secuencial)" \
+      "retry"     "Reintentar items fallados" \
+      "clear"     "Limpiar cola (solo pendientes)" \
+      "back"      "Volver al menú principal")
     case "$choice" in
-      add)    queue_add ;;
-      list)   queue_list ;;
-      process) queue_process ;;
-      clear)  queue_clear ;;
-      back|*) return ;;
+      add)      queue_add ;;
+      list)     queue_list ;;
+      process)  queue_process ;;
+      retry)    queue_retry ;;
+      clear)    queue_clear ;;
+      back|*)   return ;;
     esac
   done
 }
@@ -656,9 +762,26 @@ queue_add() {
     "av1opus"      "codec:av1:opus,res,br" \
     "custom"       "Escribir -S personalizado")
 
+  local options='{}'
+  case "$mode" in
+    playlist)
+      local start end
+      start=$(ask "Video inicial (1 = primero)" "1")
+      end=$(ask "Video final (vacío = hasta el final)" "")
+      options=$(printf '{"start":"%s","end":"%s"}' "$start" "$end")
+      ;;
+    custom)
+      local extra_flags
+      extra_flags=$(ask "Flags extra para yt-dlp" "")
+      options=$(printf '{"extra_flags":"%s"}' "$(json_escape "$extra_flags")")
+      ;;
+  esac
+
+  local id="q_$(date +%s%N)"
+  local created=$(date -Iseconds)
   local item
-  item=$(printf '{"id":"q_%s","url":"%s","mode":"%s","preset":"%s","status":"pending"}' \
-    "$(date +%s%N)" "$url" "$mode" "$preset")
+  item=$(json_build_queue_item "$id" "$url" "$mode" "$preset" "$options" "pending" "$created")
+
   QUEUE+=("$item")
   save_queue
   ok "Añadido a cola (pos ${#QUEUE[@]})"
@@ -673,10 +796,10 @@ queue_list() {
   local i=1
   for item in "${QUEUE[@]}"; do
     local id mode preset status
-    id=$(echo "$item" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-    mode=$(echo "$item" | sed -n 's/.*"mode":"\([^"]*\)".*/\1/p')
-    preset=$(echo "$item" | sed -n 's/.*"preset":"\([^"]*\)".*/\1/p')
-    status=$(echo "$item" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+    id=$(json_get "$item" "id")
+    mode=$(json_get "$item" "mode")
+    preset=$(json_get "$item" "preset")
+    status=$(json_get "$item" "status")
     printf "  %2d. [%s] %s | %s | %s\n" "$i" "$status" "$mode" "$preset" "$id"
     ((i++))
   done
@@ -689,30 +812,126 @@ queue_process() {
     info "Cola vacía"
     return
   fi
-  warn "T7 implementará procesamiento real con yt-dlp"
-  info "Por ahora: simulación"
+
+  local i=0
   for item in "${QUEUE[@]}"; do
-    local id mode
-    id=$(echo "$item" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-    mode=$(echo "$item" | sed -n 's/.*"mode":"\([^"]*\)".*/\1/p')
-    printf "  → Procesando %s (%s)...\n" "$id" "$mode"
-    sleep 0.5
+    ((i++))
+    local id status mode preset url options
+    id=$(json_get "$item" "id")
+    status=$(json_get "$item" "status")
+    [[ "$status" != "pending" ]] && continue
+
+    mode=$(json_get "$item" "mode")
+    preset=$(json_get "$item" "preset")
+    url=$(json_get "$item" "url")
+    options=$(json_get_raw "$item" "options")
+
+    # Marcar running
+    local started updated_item
+    started=$(date -Iseconds)
+    updated_item=$(sed "s/\"status\":\"pending\"/\"status\":\"running\",\"started\":\"$started\"/" <<<"$item")
+    QUEUE[$((i-1))]="$updated_item"
+    save_queue
+
+    info "Procesando $i/${#QUEUE[@]}: $mode ($preset)"
+    local exit_code=0
+
+    case "$mode" in
+      video)
+        build_format_args "$preset"
+        template=$(build_output_template "video" "$OUTDIR")
+        yt-dlp "${YTDLP_ARGS[@]}" -o "$template" "$url" || exit_code=$?
+        ;;
+      audio)
+        build_format_args "$preset"
+        template=$(build_output_template "audio" "$OUTDIR")
+        yt-dlp "${YTDLP_ARGS[@]}" -x -o "$template" "$url" || exit_code=$?
+        ;;
+      playlist)
+        build_format_args "$preset"
+        template=$(build_output_template "playlist" "$OUTDIR")
+        local start end playlist_items
+        start=$(json_get "$options" "start")
+        end=$(json_get "$options" "end")
+        playlist_items="${start:-1}-"
+        [[ -n "$end" && "$end" != "null" ]] && playlist_items="${start:-1}-${end}"
+        yt-dlp "${YTDLP_ARGS[@]}" --playlist-items "$playlist_items" -o "$template" "$url" || exit_code=$?
+        ;;
+      channel)
+        build_format_args "$preset"
+        template=$(build_output_template "channel" "$OUTDIR")
+        yt-dlp "${YTDLP_ARGS[@]}" -o "$template" "$url" || exit_code=$?
+        ;;
+      custom)
+        build_format_args "$preset"
+        template=$(build_output_template "custom" "$OUTDIR")
+        local extra_flags
+        extra_flags=$(json_get "$options" "extra_flags")
+        local -a extra_arr=()
+        [[ -n "$extra_flags" && "$extra_flags" != "null" ]] && extra_arr=($extra_flags)
+        yt-dlp "${YTDLP_ARGS[@]}" "${extra_arr[@]}" -o "$template" "$url" || exit_code=$?
+        ;;
+    esac
+
+    local finished
+    finished=$(date -Iseconds)
+    if (( exit_code == 0 )); then
+      updated_item=$(sed "s/\"status\":\"running\"/\"status\":\"done\",\"finished\":\"$finished\"/" <<<"$updated_item")
+      ok "Item $id completado"
+    else
+      updated_item=$(sed "s/\"status\":\"running\"/\"status\":\"failed\",\"finished\":\"$finished\",\"error\":\"exit code $exit_code\"/" <<<"$updated_item")
+      warn "Item $id falló (código $exit_code)"
+    fi
+    QUEUE[$((i-1))]="$updated_item"
+    save_queue
   done
-  ok "Cola procesada (simulación)"
-  ask "Presiona Enter para continuar" "" >/dev/null
+  ok "Cola procesada"
 }
 
-queue_clear() {
-  if confirm "¿Limpiar TODOS los items pendientes?"; then
-    QUEUE=()
+queue_retry() {
+  local retried=0
+  for i in "${!QUEUE[@]}"; do
+    local status
+    status=$(json_get "${QUEUE[i]}" "status")
+    if [[ "$status" == "failed" ]]; then
+      local updated
+      updated=$(sed 's/"status":"failed"/"status":"pending"/' <<<"${QUEUE[i]}")
+      QUEUE[i]="$updated"
+      ((retried++))
+    fi
+  done
+  if (( retried > 0 )); then
     save_queue
-    ok "Cola limpiada"
+    ok "$retried item(s) marcados para reintento"
+  else
+    info "No hay items fallados para reintentar"
   fi
 }
 
-# ──────────────────────────────────────────────────────────────────────
-# SETTINGS / HELP
-# ──────────────────────────────────────────────────────────────────────
+queue_clear() {
+  local pending=0
+  for item in "${QUEUE[@]}"; do
+    local status
+    status=$(json_get "$item" "status")
+    [[ "$status" == "pending" ]] && ((pending++))
+  done
+  if (( pending == 0 )); then
+    info "No hay items pendientes para limpiar"
+    return
+  fi
+  if confirm "¿Limpiar $pending item(s) pendiente(s)?"; then
+    local new_queue=()
+    for item in "${QUEUE[@]}"; do
+      local status
+      status=$(json_get "$item" "status")
+      [[ "$status" != "pending" ]] && new_queue+=("$item")
+    done
+    QUEUE=("${new_queue[@]}")
+    save_queue
+    ok "$pending item(s) pendiente(s) eliminado(s)"
+  fi
+}
+
 # ──────────────────────────────────────────────────────────────────────
 # SETTINGS / HELP
 # ──────────────────────────────────────────────────────────────────────

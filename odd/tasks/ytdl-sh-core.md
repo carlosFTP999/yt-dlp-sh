@@ -78,8 +78,8 @@
 | T3 | S3, S4 | inline | Post-procesado yt-dlp (embed metadata/thumb/chapters/sponsorblock) + red defaults | `feat(core): yt-dlp post-processing and network defaults` | ✅ Done (commit 3ad3a56) |
 | T4 | S5 | inline | Validación pre-vuelo (deps, red, disco) | `feat(core): pre-flight validation` | ✅ Done (covered by T3) |
 | T5 | S7 | inline | Dry-run flag (`-n`/`--dry-run`) | `feat(core): dry-run simulation` | ✅ Done (covered by T2) |
-| T6 | S8 | inline | Config dirs + files (config, history, archive, queue) | `feat(core): persistent config and history` | ✅ Approved — Implementing |
-| T7 | S1.6, S10 | inline | Queue básica (add/list/process sequential) + signals/trap | `feat(core): queue system and signal handling` | ⏳ Pending |
+| T6 | S8 | inline | Config dirs + files (config, history, archive, queue) | `feat(core): persistent config and history` | ✅ Done (commit f930a88) |
+| T7 | S1.6, S10 | inline | Queue básica (add/list/process sequential) + signals/trap | `feat(core): queue system and signal handling` | ✅ Approved — Implementing |
 | T8 | S1-S10 | inline | Integración end-to-end + smoke test 5 URLs | `feat(core): e2e integration and smoke tests` | ⏳ Pending |
 | T4 | S5 | inline | Validación pre-vuelo (deps, red, disco) | `feat(core): pre-flight validation` | ⏳ Pending |
 | T5 | S7 | inline | Dry-run flag (`-n`/`--dry-run`) | `feat(core): dry-run simulation` | ⏳ Pending |
@@ -123,6 +123,12 @@
 
 ### L11 — 2026-10-20 — T6 Aprobado (Usuario)
 > T6 aprobado: load_config()/save_config() key=value atómico, settings_menu() interactivo con choose()/ask(), 11 variables persistibles (OUTDIR, PRESET, PARALLEL, SUB_LANGS, SPONSORBLOCK_REMOVE, PROXY, COOKIES_BROWSER, RATE_LIMIT, FORCE_IPV4, YT_PLAYER_CLIENT, NOTIFY_CMD). Validación key=value, write atómico temp+mv, merge con defaults, export para subprocessos. Commit: feat(core): persistent config key=value.
+
+### L12 — 2026-10-20 — T6 Completado (Orchestrator)
+> Implementado y commiteado T6 (commit f930a88): CONFIG_DEFAULTS array asociativo con 11 variables, load_config() valida KEY=VALUE e ignora comentarios/keys desconocidas, save_config() write atómico temp+mv, settings_menu() interactivo choose()/ask() con save/reset/back. Variables exportadas para subprocesses. Validación previene inyección de código. Merge con defaults. Commit en feature/ytdl-sh-core.
+
+### L13 — 2026-10-20 — T7 Aprobado (Usuario)
+> T7 aprobado: Queue persistente JSONL 100% pure bash (sin jq). save_queue()/load_queue() atómicos, queue_process() real secuencial, trap_cleanup() real (save queue + rm temp dirs + restore cursor), señales INT/TERM. JSONL parsing con bash nativo (is_valid_json, json_get, json_get_raw, json_build_queue_item, json_escape). queue_add() construye JSON con printf+escape. PARALLEL listo para futuro. Commit: feat(core): queue persistence and signal handling.
 
 ---
 
