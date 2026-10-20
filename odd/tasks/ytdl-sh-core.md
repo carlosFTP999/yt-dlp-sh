@@ -75,7 +75,12 @@
 |----|-------|-------|-------------|--------|--------|
 | T1 | S1.1-S1.5, S9 | inline | Menú principal + 5 modos + UI `choose()`/`ask()` | `feat(core): main menu and 5 download modes` | ✅ Done (commit 1cef9a0) |
 | T2 | S2, S6 | inline | Format sorting `-S "res,br"` + templates por modo + `%(ext)s` | `feat(core): format sorting and output templates` | ✅ Done (commit dc540bd) |
-| T3 | S3, S4 | inline | Post-procesado yt-dlp (embed metadata/thumb/chapters/sponsorblock) + red defaults | `feat(core): yt-dlp post-processing and network defaults` | ✅ Approved — Implementing |
+| T3 | S3, S4 | inline | Post-procesado yt-dlp (embed metadata/thumb/chapters/sponsorblock) + red defaults | `feat(core): yt-dlp post-processing and network defaults` | ✅ Done (commit 3ad3a56) |
+| T4 | S5 | inline | Validación pre-vuelo (deps, red, disco) | `feat(core): pre-flight validation` | ✅ Done (covered by T3) |
+| T5 | S7 | inline | Dry-run flag (`-n`/`--dry-run`) | `feat(core): dry-run simulation` | ✅ Done (covered by T2) |
+| T6 | S8 | inline | Config dirs + files (config, history, archive, queue) | `feat(core): persistent config and history` | ✅ Approved — Implementing |
+| T7 | S1.6, S10 | inline | Queue básica (add/list/process sequential) + signals/trap | `feat(core): queue system and signal handling` | ⏳ Pending |
+| T8 | S1-S10 | inline | Integración end-to-end + smoke test 5 URLs | `feat(core): e2e integration and smoke tests` | ⏳ Pending |
 | T4 | S5 | inline | Validación pre-vuelo (deps, red, disco) | `feat(core): pre-flight validation` | ⏳ Pending |
 | T5 | S7 | inline | Dry-run flag (`-n`/`--dry-run`) | `feat(core): dry-run simulation` | ⏳ Pending |
 | T6 | S8 | inline | Config dirs + files (config, history, archive, queue) | `feat(core): persistent config and history` | ⏳ Pending |
@@ -112,6 +117,12 @@
 
 ### L9 — 2026-10-20 — T3 Aprobado (Usuario)
 > T3 aprobado: check_dependencies() real (yt-dlp ≥ 2023.01, ffmpeg ≥ 4.0, curl), preflight_checks() real (YouTube + googlevideo + espacio disco), warnings accionables, continue confirm. Force IPv4 y extractor args opcionales via config. Commit: feat(core): pre-flight validation and dependency checks.
+
+### L10 — 2026-10-20 — T3 Completado (Orchestrator)
+> Implementado y commiteado T3 (commit 3ad3a56): check_dependencies() con version checks (yt-dlp ≥ 2023.01, ffmpeg ≥ 4.0, curl), preflight_checks() real (YouTube + googlevideo + disk space), warnings accionables con confirmación. build_format_args() soporta FORCE_IPV4 y YT_PLAYER_CLIENT via config. main() llama preflight_checks() tras check_dependencies(). Commits en feature/ytdl-sh-core.
+
+### L11 — 2026-10-20 — T6 Aprobado (Usuario)
+> T6 aprobado: load_config()/save_config() key=value atómico, settings_menu() interactivo con choose()/ask(), 11 variables persistibles (OUTDIR, PRESET, PARALLEL, SUB_LANGS, SPONSORBLOCK_REMOVE, PROXY, COOKIES_BROWSER, RATE_LIMIT, FORCE_IPV4, YT_PLAYER_CLIENT, NOTIFY_CMD). Validación key=value, write atómico temp+mv, merge con defaults, export para subprocessos. Commit: feat(core): persistent config key=value.
 
 ---
 

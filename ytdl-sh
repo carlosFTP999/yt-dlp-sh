@@ -24,10 +24,27 @@ SPONSORBLOCK_REMOVE="${SPONSORBLOCK_REMOVE:-sponsor,selfpromo,interaction}"
 PROXY="${PROXY:-}"
 COOKIES_BROWSER="${COOKIES_BROWSER:-}"
 RATE_LIMIT="${RATE_LIMIT:-}"
+FORCE_IPV4="${FORCE_IPV4:-false}"
+YT_PLAYER_CLIENT="${YT_PLAYER_CLIENT:-}"
 NOTIFY_CMD="${NOTIFY_CMD:-}"
 
 # Dry-run flag (T2)
 DRY_RUN="${DRY_RUN:-false}"
+
+# Config defaults map (para load/save/reset)
+declare -A CONFIG_DEFAULTS=(
+  [OUTDIR]="$HOME/Descargas"
+  [PRESET]="maxima"
+  [PARALLEL]="1"
+  [SUB_LANGS]="es,en"
+  [SPONSORBLOCK_REMOVE]="sponsor,selfpromo,interaction"
+  [PROXY]=""
+  [COOKIES_BROWSER]=""
+  [RATE_LIMIT]=""
+  [FORCE_IPV4]="false"
+  [YT_PLAYER_CLIENT]=""
+  [NOTIFY_CMD]=""
+)
 
 # ──────────────────────────────────────────────────────────────────────
 # UI HELPERS — Pure bash ANSI (cero deps)
@@ -175,9 +192,32 @@ init_config_dirs() {
 }
 
 load_config() {
-  # T6: leer key=value de $CONFIG_FILE
-  # Por ahora: no-op
-  :
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  while IFS='=' read -r key value; do
+    [[ -z "$key" ]] && continue
+    [[ "$key" =~ ^# ]] && continue  # comentarios
+    [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue  # validar key
+    # Solo keys conocidas en CONFIG_DEFAULTS
+    [[ -v CONFIG_DEFAULTS["$key"] ]] || continue
+    # Exportar para subprocessos
+    export "$key"="$value"
+    # Setear variable global (indirect expansion)
+    printf -v "$key" '%s' "$value"
+  done < "$CONFIG_FILE"
+}
+
+# Guardar config (atómico: temp + mv)
+save_config() {
+  local tmp
+  tmp=$(mktemp "${CONFIG_FILE}.XXXXXX") || die "No se pudo crear temp file"
+  {
+    echo "# ytdl-sh config — $(date -Iseconds)"
+    for key in "${!CONFIG_DEFAULTS[@]}"; do
+      local val="${!key}"  # indirect expansion
+      printf '%s=%s\n' "$key" "$val"
+    done
+  } > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  ok "Configuración guardada en $CONFIG_FILE"
 }
 
 check_dependencies() {
@@ -673,12 +713,55 @@ queue_clear() {
 # ──────────────────────────────────────────────────────────────────────
 # SETTINGS / HELP
 # ──────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────
+# SETTINGS / HELP
+# ──────────────────────────────────────────────────────────────────────
 settings_menu() {
-  print_header "AJUSTES (Fase 1 — Solo lugar reservado)"
-  info "Configuración persistente se implementa en T6"
-  info "Archivo: $CONFIG_FILE"
-  info "Formato: key=value (ej: OUTDIR=/ruta, PRESET=maxima)"
-  ask "Presiona Enter para volver" "" >/dev/null
+  while true; do
+    print_header "AJUSTES"
+    # Mostrar valores actuales
+    for key in "${!CONFIG_DEFAULTS[@]}"; do
+      printf "  %s=%s\n" "$key" "${!key}"
+    done
+    echo
+    local choice
+    choice=$(choose "Selecciona opción a editar" \
+      "OUTDIR"        "Directorio base de salida" \
+      "PRESET"        "Preset de calidad (maxima/equilibrado/compatibilidad/minimo/av1opus/custom)" \
+      "PARALLEL"      "Jobs paralelos en queue (1-8)" \
+      "SUB_LANGS"     "Idiomas subtítulos (coma-separado, ej: es,en,pt)" \
+      "SPONSORBLOCK_REMOVE" "Categorías a remover (coma-separado)" \
+      "PROXY"         "Proxy HTTP/SOCKS (ej: socks5://127.0.0.1:9050)" \
+      "COOKIES_BROWSER" "Browser para cookies (chrome/firefox/edge/brave/opera/vivaldi)" \
+      "RATE_LIMIT"    "Rate limit (ej: 1M, 500K, vacío=sin límite)" \
+      "FORCE_IPV4"    "Forzar IPv4 (true/false)" \
+      "YT_PLAYER_CLIENT" "YouTube player client (android/web/mweb/tv_embed)" \
+      "NOTIFY_CMD"    "Comando notificación custom (ej: notify-send 'title' 'body')" \
+      "save"          "Guardar y volver" \
+      "reset"         "Restaurar defaults" \
+      "back"          "Volver sin guardar")
+    
+    case "$choice" in
+      save) save_config; return ;;
+      reset) 
+        if confirm "¿Restaurar TODOS los defaults?"; then
+          for key in "${!CONFIG_DEFAULTS[@]}"; do
+            printf -v "$key" '%s' "${CONFIG_DEFAULTS[$key]}"
+            export "$key"
+          done
+          ok "Defaults restaurados"
+        fi
+        ;;
+      back) return ;;
+      *) 
+        local new_val
+        new_val=$(ask "Nuevo valor para $choice" "${!choice}")
+        printf -v "$choice" '%s' "$new_val"
+        export "$choice"
+        ok "$choice actualizado (usa 'Guardar' para persistir)"
+        ;;
+    esac
+  done
 }
 
 help_screen() {
