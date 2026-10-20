@@ -74,8 +74,8 @@
 | ID | Specs | Route | Description | Commit | Status |
 |----|-------|-------|-------------|--------|--------|
 | T1 | S1.1-S1.5, S9 | inline | Menú principal + 5 modos + UI `choose()`/`ask()` | `feat(core): main menu and 5 download modes` | ✅ Done (commit 1cef9a0) |
-| T2 | S2, S6 | inline | Format sorting `-S "res,br"` + templates por modo + `%(ext)s` | `feat(core): format sorting and output templates` | ✅ Approved — Implementing |
-| T3 | S3, S4 | inline | Post-procesado yt-dlp (embed metadata/thumb/chapters/sponsorblock) + red defaults | `feat(core): yt-dlp post-processing and network defaults` | ⏳ Pending |
+| T2 | S2, S6 | inline | Format sorting `-S "res,br"` + templates por modo + `%(ext)s` | `feat(core): format sorting and output templates` | ✅ Done (commit dc540bd) |
+| T3 | S3, S4 | inline | Post-procesado yt-dlp (embed metadata/thumb/chapters/sponsorblock) + red defaults | `feat(core): yt-dlp post-processing and network defaults` | ✅ Approved — Implementing |
 | T4 | S5 | inline | Validación pre-vuelo (deps, red, disco) | `feat(core): pre-flight validation` | ⏳ Pending |
 | T5 | S7 | inline | Dry-run flag (`-n`/`--dry-run`) | `feat(core): dry-run simulation` | ⏳ Pending |
 | T6 | S8 | inline | Config dirs + files (config, history, archive, queue) | `feat(core): persistent config and history` | ⏳ Pending |
@@ -106,6 +106,12 @@
 
 ### L7 — 2026-10-20 — T2 Aprobado (Usuario)
 > T2 aprobado: Format sorting `-S "res,br"` + templates por modo + integración real yt-dlp en 5 modos. Énfasis: **playlists de YouTube deben funcionar correctamente**. Subtítulos stub siempre activo (menú en T6). Audio `-x` sin `--audio-format` (contenedor original). Playlist range `--playlist-items "$start-$end"`. Custom flags array seguro. Dry-run pasa `--simulate --print-json`. Commit: `feat(core): format sorting and output templates`.
+
+### L8 — 2026-10-20 — T2 Completado (Orchestrator)
+> Implementado y commiteado T2 (commit dc540bd): build_format_args() con 6 presets, build_output_template() por modo, integración real yt-dlp en 5 modos. Format sorting -S sin -f restrictivo (preserva webm/mkv/mp4). Audio -x sin --audio-format. Playlist --playlist-items range. Custom flags array seguro. Dry-run --simulate --print-json. Subtítulos stub siempre activo. Commits en feature/ytdl-sh-core.
+
+### L9 — 2026-10-20 — T3 Aprobado (Usuario)
+> T3 aprobado: check_dependencies() real (yt-dlp ≥ 2023.01, ffmpeg ≥ 4.0, curl), preflight_checks() real (YouTube + googlevideo + espacio disco), warnings accionables, continue confirm. Force IPv4 y extractor args opcionales via config. Commit: feat(core): pre-flight validation and dependency checks.
 
 ---
 

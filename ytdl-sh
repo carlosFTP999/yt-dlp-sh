@@ -181,15 +181,63 @@ load_config() {
 }
 
 check_dependencies() {
-  # T4: verificar yt-dlp, ffmpeg, curl
-  # Por ahora: asumir presentes
-  return 0
+  # yt-dlp
+  command -v yt-dlp >/dev/null || die "yt-dlp no encontrado. Instala: pipx install yt-dlp / brew install yt-dlp / apt install yt-dlp"
+  local ytdlp_ver
+  ytdlp_ver=$(yt-dlp --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  [[ -n "$ytdlp_ver" ]] || die "No se pudo obtener versión de yt-dlp"
+  # Comparar versión ≥ 2023.01 (año ≥ 2023)
+  local year="${ytdlp_ver%%.*}"
+  (( year >= 2023 )) || warn "yt-dlp versión $ytdlp_ver — se recomienda ≥ 2023.01 para -S"
+
+  # ffmpeg
+  command -v ffmpeg >/dev/null || die "ffmpeg no encontrado. Instala: apt install ffmpeg / brew install ffmpeg"
+  local ffmpeg_ver
+  ffmpeg_ver=$(ffmpeg -version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+  [[ -n "$ffmpeg_ver" ]] || warn "No se pudo obtener versión de ffmpeg"
+
+  # curl
+  command -v curl >/dev/null || die "curl no encontrado. Necesario para validación de red"
+
+  ok "Dependencias OK: yt-dlp $ytdlp_ver, ffmpeg $ffmpeg_ver"
 }
 
-save_queue() {
-  # T7: persistir queue array a $QUEUE_FILE (JSONL)
-  # Por ahora: no-op
-  :
+# ──────────────────────────────────────────────────────────────────────
+# T3: PREFLIGHT CHECKS — Validación real de red y disco
+# ──────────────────────────────────────────────────────────────────────
+
+preflight_checks() {
+  local warn_count=0
+
+  # YouTube
+  if timeout 3 curl -sI "https://www.youtube.com" >/dev/null 2>&1; then
+    ok "YouTube accesible"
+  else
+    warn "YouTube NO accesible — ¿red/proxy?"
+    ((warn_count++))
+  fi
+
+  # googlevideo (CDN de video) — CRÍTICO para descargas
+  if timeout 3 curl -sI "https://googlevideo.com" >/dev/null 2>&1; then
+    ok "googlevideo (CDN) accesible"
+  else
+    warn "googlevideo NO accesible — las descargas FALLARÁN. ¿Proxy corporativo? Prueba VPN o --proxy"
+    ((warn_count++))
+  fi
+
+  # Espacio disco
+  local avail_kb
+  avail_kb=$(df --output=avail "$OUTDIR" 2>/dev/null | tail -1 | tr -d ' ')
+  if [[ -n "$avail_kb" && "$avail_kb" -lt 1048576 ]]; then  # < 1GB en KB
+    warn "Espacio en disco < 1GB en $OUTDIR (${avail_kb}KB disponibles)"
+    ((warn_count++))
+  fi
+
+  if (( warn_count > 0 )); then
+    echo
+    warn "Se detectaron $warn_count advertencia(s). ¿Continuar de todos modos?"
+    confirm "Continuar?" || die "Abortado por usuario"
+  fi
 }
 
 load_queue() {
@@ -265,6 +313,12 @@ build_format_args() {
   [[ -n "$PROXY" ]] && args+=(--proxy "$PROXY")
   [[ -n "$COOKIES_BROWSER" ]] && args+=(--cookies-from-browser "$COOKIES_BROWSER")
   [[ -n "$RATE_LIMIT" ]] && args+=(--throttled-rate "$RATE_LIMIT")
+
+  # Force IPv4 (opcional via config)
+  [[ "${FORCE_IPV4:-false}" == "true" ]] && args+=(--force-ipv4)
+
+  # Extractor args para YouTube (opcional via config)
+  [[ -n "${YT_PLAYER_CLIENT:-}" ]] && args+=(--extractor-args "youtube:player_client=${YT_PLAYER_CLIENT}")
 
   # Dry-run
   if [[ "$DRY_RUN" == "true" ]]; then
@@ -738,6 +792,7 @@ main() {
   init_config_dirs
   load_config
   check_dependencies
+  preflight_checks
 
   # Traps (T7 implementará cleanup real)
   trap 'trap_cleanup; exit 130' INT
