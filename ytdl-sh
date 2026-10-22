@@ -57,18 +57,17 @@ declare -A CONFIG_DEFAULTS=(
 # Detectar capacidades de terminal
 if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
   HAS_TPUT=1
-  readonly BOLD="$(tput bold 2>/dev/null || echo '')"
-  readonly DIM="$(tput dim 2>/dev/null || echo '')"
-  readonly RED="$(tput setaf 1 2>/dev/null || echo '')"
-  readonly GREEN="$(tput setaf 2 2>/dev/null || echo '')"
-  readonly YELLOW="$(tput setaf 3 2>/dev/null || echo '')"
-  readonly BLUE="$(tput setaf 4 2>/dev/null || echo '')"
-  readonly CYAN="$(tput setaf 6 2>/dev/null || echo '')"
-  readonly RESET="$(tput sgr0 2>/dev/null || echo '')"
-  readonly CLEAR_LINE="$(tput el 2>/dev/null || echo '')"
+  BOLD="$(tput bold 2>/dev/null || echo '')"
+  DIM="$(tput dim 2>/dev/null || echo '')"
+  RED="$(tput setaf 1 2>/dev/null || echo '')"
+  GREEN="$(tput setaf 2 2>/dev/null || echo '')"
+  YELLOW="$(tput setaf 3 2>/dev/null || echo '')"
+  BLUE="$(tput setaf 4 2>/dev/null || echo '')"
+  CYAN="$(tput setaf 6 2>/dev/null || echo '')"
+  RESET="$(tput sgr0 2>/dev/null || echo '')"
 else
   HAS_TPUT=0
-  readonly BOLD="" DIM="" RED="" GREEN="" YELLOW="" BLUE="" CYAN="" RESET="" CLEAR_LINE=""
+  BOLD="" DIM="" RED="" GREEN="" YELLOW="" BLUE="" CYAN="" RESET=""
 fi
 
 # Helpers de salida
@@ -1503,8 +1502,9 @@ queue_add() {
       ;;
   esac
 
-  local id="q_$(date +%s%N)"
-  local created=$(date -Iseconds)
+  local id created
+  id="q_$(date +%s%N)"
+  created=$(date -Iseconds)
   local item
   item=$(json_build_queue_item "$id" "$url" "$mode" "$preset" "$options" "pending" "$created")
 
@@ -1594,6 +1594,8 @@ queue_process() {
         local extra_flags
         extra_flags=$(json_get "$options" "extra_flags")
         local -a extra_arr=()
+        # Word splitting intencional: las flags van separadas por espacios
+        # shellcheck disable=SC2206
         [[ -n "$extra_flags" && "$extra_flags" != "null" ]] && extra_arr=($extra_flags)
         yt-dlp "${YTDLP_ARGS[@]}" "${extra_arr[@]}" -o "$template" "$url" || exit_code=$?
         ;;
@@ -1715,6 +1717,8 @@ settings_menu() {
         if confirm "¿Restaurar TODOS los defaults?"; then
           for key in "${!CONFIG_DEFAULTS[@]}"; do
             printf -v "$key" '%s' "${CONFIG_DEFAULTS[$key]}"
+            # Export con nombre dinámico: shellcheck no lo detecta (SC2163)
+            # shellcheck disable=SC2163
             export "$key"
           done
           ok "Defaults restaurados"
@@ -1725,6 +1729,8 @@ settings_menu() {
         local new_val
         new_val=$(ask "Nuevo valor para $choice" "${!choice}") || { info "Cancelado"; continue; }
         printf -v "$choice" '%s' "$new_val"
+        # Export con nombre dinámico: shellcheck no lo detecta (SC2163)
+        # shellcheck disable=SC2163
         export "$choice"
         ok "$choice actualizado (usa 'Guardar' para persistir)"
         ;;
