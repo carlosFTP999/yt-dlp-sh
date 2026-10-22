@@ -79,8 +79,8 @@
 | T4 | S5 | inline | Validación pre-vuelo (deps, red, disco) | `feat(core): pre-flight validation` | ✅ Done (covered by T3) |
 | T5 | S7 | inline | Dry-run flag (`-n`/`--dry-run`) | `feat(core): dry-run simulation` | ✅ Done (covered by T2) |
 | T6 | S8 | inline | Config dirs + files (config, history, archive, queue) | `feat(core): persistent config and history` | ✅ Done (commit f930a88) |
-| T7 | S1.6, S10 | inline | Queue básica (add/list/process sequential) + signals/trap | `feat(core): queue system and signal handling` | ✅ Approved — Implementing |
-| T8 | S1-S10 | inline | Integración end-to-end + smoke test 5 URLs | `feat(core): e2e integration and smoke tests` | ⏳ Pending |
+| T7 | S1.6, S10 | inline | Queue básica (add/list/process sequential) + signals/trap | `feat(core): queue system and signal handling` | ✅ Done (commit 9742136) |
+| T8 | S1-S10 | inline | Integración end-to-end + smoke test 5 URLs | `test(core): e2e smoke tests` | ✅ Approved — Implementing |
 | T4 | S5 | inline | Validación pre-vuelo (deps, red, disco) | `feat(core): pre-flight validation` | ⏳ Pending |
 | T5 | S7 | inline | Dry-run flag (`-n`/`--dry-run`) | `feat(core): dry-run simulation` | ⏳ Pending |
 | T6 | S8 | inline | Config dirs + files (config, history, archive, queue) | `feat(core): persistent config and history` | ⏳ Pending |
@@ -129,6 +129,12 @@
 
 ### L13 — 2026-10-20 — T7 Aprobado (Usuario)
 > T7 aprobado: Queue persistente JSONL 100% pure bash (sin jq). save_queue()/load_queue() atómicos, queue_process() real secuencial, trap_cleanup() real (save queue + rm temp dirs + restore cursor), señales INT/TERM. JSONL parsing con bash nativo (is_valid_json, json_get, json_get_raw, json_build_queue_item, json_escape). queue_add() construye JSON con printf+escape. PARALLEL listo para futuro. Commit: feat(core): queue persistence and signal handling.
+
+### L14 — 2026-10-20 — T7 Completado (Orchestrator)
+> Implementado y commiteado T7 (commit 9742136): JSONL parsing 100% pure bash (is_valid_json, json_get, json_get_raw, json_build_queue_item, json_escape), save_queue/load_queue atómicos temp+mv, queue_process real secuencial con yt-dlp (pending->running->done/failed), queue_retry, queue_clear, trap_cleanup real (save queue + rm temp dirs + restore cursor), señales INT/TERM -> trap_cleanup + exit 130/143. register_temp_dir() para tracking temp dirs. 100% pure bash, sin jq. Commit en feature/ytdl-sh-core.
+
+### L15 — 2026-10-20 — T8 Aprobado (Usuario)
+> T8 aprobado: Harness smoke tests pure bash (sin framework). tests/smoke-test.sh + tests/lib/test-helpers.sh. 8 tests automáticos: config round-trip, JSONL build/get, queue persistence, format args per preset, template per mode, dry-run flag, preflight warnings, trap_cleanup. Test de descarga real opcional (--with-download) con video BaW_jenozKc (yt-dlp official test CC). Estado aislado XDG_CONFIG_HOME override a mktemp -d. Exit code = # fallos (CI-ready). Commit: test(core): e2e smoke tests.
 
 ---
 

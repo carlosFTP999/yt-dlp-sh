@@ -121,8 +121,8 @@ choose() {
         fi
         IFS= read -rsn1 -t 0.001 key3
         case "${key2}${key3}" in
-          '[A') (( sel > 0 )) && ((sel--)) ;;
-          '[B') (( sel < n_choices - 1 )) && ((sel++)) ;;
+          '[A') if (( sel > 0 )); then sel=$((sel - 1)); fi ;;
+          '[B') if (( sel < n_choices - 1 )); then sel=$((sel + 1)); fi ;;
         esac
         ;;
       '') # Enter
@@ -236,44 +236,115 @@ json_escape() {
 }
 
 # Validar línea JSONL básica (sin jq)
+# Recorre la línea ignorando caracteres escapados dentro de strings,
+# para no contar comillas/llaves que son parte del contenido.
 # Retorna 0 si parece JSON válido, 1 si no
 is_valid_json() {
   local line="$1"
   [[ -z "$line" ]] && return 1
   # Debe empezar con { y terminar con }
-  [[ "$line" =~ ^\{.*\}$ ]] || return 1
-  # Llaves balanceadas (básico)
-  local open close
-  open=$(grep -o '{' <<<"$line" | wc -l)
-  close=$(grep -o '}' <<<"$line" | wc -l)
-  (( open == close )) || return 1
-  # Comillas balanceadas (aprox)
-  local quotes
-  quotes=$(grep -o '"' <<<"$line" | wc -l)
-  (( quotes % 2 == 0 )) || return 1
+  [[ "$line" == "{"*"}" ]] || return 1
+
+  local i ch len=${#line}
+  local depth=0 in_string=0
+  for ((i = 0; i < len; i++)); do
+    ch="${line:i:1}"
+    if (( in_string )); then
+      if [[ "$ch" == '\' ]]; then
+        i=$((i + 1))  # saltar el carácter escapado
+      elif [[ "$ch" == '"' ]]; then
+        in_string=0
+      fi
+      continue
+    fi
+    case "$ch" in
+      '"') in_string=1 ;;
+      '{') depth=$((depth + 1)) ;;
+      '}') depth=$((depth - 1)); if (( depth < 0 )); then return 1; fi ;;
+    esac
+  done
+
+  (( depth == 0 )) || return 1
+  (( in_string == 0 )) || return 1
   return 0
 }
 
-# Extraer valor de campo simple (string) de JSON
-# Uso: json_get "$line" "id"
-json_get() {
-  local json="$1"
-  local key="$2"
-  # Busca "key":"value" o "key": "value" (escapa comillas en value)
-  local val
-  val=$(sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" <<<"$json")
-  printf '%s' "$val"
-}
-
-# Extraer valor de campo que puede ser string, number, bool, null, object
-# Retorna el valor raw (sin comillas si es string)
+# Extraer valor literal de campo JSON (raw: con quotes si es string)
+# Soporta strings con escapes, objetos y arrays anidados (balanceo de llaves).
+# Uso: json_get_raw "$line" "options"
 json_get_raw() {
   local json="$1"
   local key="$2"
-  # Captura todo entre : y , o } (incluye strings, numbers, true, false, null, objects)
-  local val
-  val=$(sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p" <<<"$json" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-  printf '%s' "$val"
+  local needle="\"$key\""
+
+  [[ "$json" == *"$needle"* ]] || return 1
+
+  # Prefijo hasta la primera ocurrencia de la key
+  local prefix="${json%%"$needle"*}"
+  # Resto tras la key
+  local rest="${json:${#prefix}+${#needle}}"
+  # Quitar separador ':' y whitespace inicial
+  rest="${rest#*:}"
+  rest="${rest#"${rest%%[![:space:]]*}"}"
+
+  local first="${rest:0:1}"
+  local out="" i ch depth
+
+  case "$first" in
+    '"')
+      # String: avanzar hasta el quote de cierre (respetando escapes)
+      for ((i = 1; i < ${#rest}; i++)); do
+        ch="${rest:i:1}"
+        if [[ "$ch" == '\' ]]; then
+          out+="$ch${rest:i+1:1}"
+          i=$((i + 1))
+          continue
+        fi
+        [[ "$ch" == '"' ]] && break
+        out+="$ch"
+      done
+      printf '"%s"' "$out"
+      ;;
+    '{'|'[')
+      # Objeto/array: balancear llaves y corchetes
+      depth=0
+      for ((i = 0; i < ${#rest}; i++)); do
+        ch="${rest:i:1}"
+        out+="$ch"
+        if [[ "$ch" == '{' || "$ch" == '[' ]]; then
+          depth=$((depth + 1))
+        elif [[ "$ch" == '}' || "$ch" == ']' ]]; then
+          depth=$((depth - 1))
+          if (( depth == 0 )); then break; fi
+        fi
+      done
+      printf '%s' "$out"
+      ;;
+    *)
+      # Number, bool o null: hasta la primera coma o llave de cierre
+      out="${rest%%,*}"
+      out="${out%%\}*}"
+      printf '%s' "$out"
+      ;;
+  esac
+}
+
+# Extraer valor de campo JSON "cooked": strings sin quotes y con escapes resueltos
+# Uso: json_get "$line" "id"
+json_get() {
+  local raw
+  raw=$(json_get_raw "$1" "$2") || return 1
+  if [[ "$raw" == '"'*'"' ]]; then
+    local inner="${raw:1:${#raw}-2}"
+    inner="${inner//\\\"/\"}"
+    inner="${inner//\\\\/\\}"
+    inner="${inner//\\n/$'\n'}"
+    inner="${inner//\\t/$'\t'}"
+    inner="${inner//\\r/$'\r'}"
+    printf '%s' "$inner"
+  else
+    printf '%s' "$raw"
+  fi
 }
 
 # Construir JSON para queue item
@@ -342,7 +413,7 @@ preflight_checks() {
     ok "YouTube accesible"
   else
     warn "YouTube NO accesible — ¿red/proxy?"
-    ((warn_count++))
+    warn_count=$((warn_count + 1))
   fi
 
   # googlevideo (CDN de video) — CRÍTICO para descargas
@@ -350,7 +421,7 @@ preflight_checks() {
     ok "googlevideo (CDN) accesible"
   else
     warn "googlevideo NO accesible — las descargas FALLARÁN. ¿Proxy corporativo? Prueba VPN o --proxy"
-    ((warn_count++))
+    warn_count=$((warn_count + 1))
   fi
 
   # Espacio disco
@@ -358,7 +429,7 @@ preflight_checks() {
   avail_kb=$(df --output=avail "$OUTDIR" 2>/dev/null | tail -1 | tr -d ' ')
   if [[ -n "$avail_kb" && "$avail_kb" -lt 1048576 ]]; then  # < 1GB en KB
     warn "Espacio en disco < 1GB en $OUTDIR (${avail_kb}KB disponibles)"
-    ((warn_count++))
+    warn_count=$((warn_count + 1))
   fi
 
   if (( warn_count > 0 )); then
@@ -801,7 +872,7 @@ queue_list() {
     preset=$(json_get "$item" "preset")
     status=$(json_get "$item" "status")
     printf "  %2d. [%s] %s | %s | %s\n" "$i" "$status" "$mode" "$preset" "$id"
-    ((i++))
+    i=$((i + 1))
   done
   ask "Presiona Enter para continuar" "" >/dev/null
 }
@@ -815,7 +886,7 @@ queue_process() {
 
   local i=0
   for item in "${QUEUE[@]}"; do
-    ((i++))
+    i=$((i + 1))
     local id status mode preset url options
     id=$(json_get "$item" "id")
     status=$(json_get "$item" "status")
@@ -897,7 +968,7 @@ queue_retry() {
       local updated
       updated=$(sed 's/"status":"failed"/"status":"pending"/' <<<"${QUEUE[i]}")
       QUEUE[i]="$updated"
-      ((retried++))
+      retried=$((retried + 1))
     fi
   done
   if (( retried > 0 )); then
@@ -913,7 +984,7 @@ queue_clear() {
   for item in "${QUEUE[@]}"; do
     local status
     status=$(json_get "$item" "status")
-    [[ "$status" == "pending" ]] && ((pending++))
+    if [[ "$status" == "pending" ]]; then pending=$((pending + 1)); fi
   done
   if (( pending == 0 )); then
     info "No hay items pendientes para limpiar"
