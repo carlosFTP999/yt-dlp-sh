@@ -568,6 +568,17 @@ t_format_duration_helper() {
   assert_eq "$(format_duration "NA")" "NA" || return 1
 }
 
+t_init_creates_outdir() {
+  # init_config_dirs debe crear OUTDIR: si no existe, df no puede medir
+  # el espacio y el check de disco queda inoperante
+  local d
+  d="$(mktemp -d)/subdir/deep"
+  OUTDIR="$d"
+  init_config_dirs
+  [[ -d "$d" ]] || { echo "OUTDIR no creado: $d"; return 1; }
+  return 0
+}
+
 t_preflight_deep_config_exists() {
   # PREFLIGHT_DEEP y VALIDATE_URL deben existir en CONFIG_DEFAULTS
   assert_eq "${CONFIG_DEFAULTS[PREFLIGHT_DEEP]}" "auto" || return 1
@@ -585,6 +596,100 @@ t_validate_flow_not_fatal() {
     [[ -n "$out" ]] || { echo "salida vacía"; exit 1; }
     exit 0
   )
+}
+
+# 22k. REGRESIÓN CRÍTICA: el menú debe verse en la terminal
+# choose() se invoca como `choice=$(choose ...)`. Si imprimiera el menú a
+# stdout, el command substitution lo capturaría y el usuario NO VERÍA NADA
+# del menú (solo el título). El menú debe ir a stderr; stdout solo lleva
+# el valor seleccionado.
+t_choose_menu_visible() {
+  local errfile="$ISOLATED_HOME/choose_err"
+  local out
+  out=$(printf '\n' | choose "Menu de prueba" "opcion1" "descripcion uno" "opcion2" "descripcion dos" 2>"$errfile") || true
+
+  # stdout debe contener SOLO el valor seleccionado
+  assert_eq "$out" "opcion1" || return 1
+
+  # stderr debe contener el menú completo
+  local err
+  err=$(cat "$errfile")
+  assert_contains "$err" "descripcion uno" || return 1
+  assert_contains "$err" "descripcion dos" || return 1
+  assert_contains "$err" "Menu de prueba" || return 1
+  return 0
+}
+
+# 22l. REGRESIÓN: el menú no debe contaminar stdout con el valor + menú
+t_choose_stdout_is_only_value() {
+  local out
+  out=$(printf '\n' | choose "X" "a" "desc" 2>/dev/null) || true
+  # Exactamente el valor, sin líneas extra
+  assert_eq "$out" "a" || return 1
+  [[ "$out" != *$'\n'* ]] || return 1
+  return 0
+}
+
+# 22m. REGRESIÓN CRÍTICA: las flechas deben navegar el menú
+# Leer la secuencia ESC[ en dos reads separados hace que el byte '[' se
+# pierda y las flechas dejen de funcionar: el menú queda inservible.
+t_choose_arrow_navigation() {
+  local out
+  out=$(printf '\033[B\033[B\033[B\n' | choose "Menu" \
+        "uno" "d1" "dos" "d2" "tres" "d3" "cuatro" "d4" 2>/dev/null) || true
+  # 3 flechas abajo desde "uno" → debe llegar a "cuatro"
+  assert_eq "$out" "cuatro" || return 1
+}
+
+t_choose_arrow_up() {
+  local out
+  out=$(printf '\033[B\033[B\033[A\n' | choose "Menu" \
+        "uno" "d1" "dos" "d2" "tres" "d3" 2>/dev/null) || true
+  # abajo, abajo, arriba → "dos"
+  assert_eq "$out" "dos" || return 1
+}
+
+t_choose_esc_cancels() {
+  local rc=0
+  printf '\033' | choose "Menu" "a" "d" >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "1" || return 1
+}
+
+t_choose_stops_at_boundaries() {
+  # No debe pasar del primer ni del último elemento
+  local out
+  out=$(printf '\033[A\n' | choose "Menu" "uno" "d1" "dos" "d2" 2>/dev/null) || true
+  assert_eq "$out" "uno" || return 1
+  out=$(printf '\033[B\033[B\033[B\n' | choose "Menu" "uno" "d1" "dos" "d2" 2>/dev/null) || true
+  assert_eq "$out" "dos" || return 1
+}
+
+# 22n. REGRESIÓN CRÍTICA: el valor devuelto por choose NO debe traer escapes
+# tput civis/cnorm escriben a stdout. Como choose() se invoca como
+# $(choose ...), esas secuencias contaminaban el valor seleccionado y el
+# case nunca matcheaba: el menú respondía a las flechas pero Enter no
+# hacía nada. Se usa un mock de tput que escribe a stdout, como el real.
+t_choose_value_is_clean() {
+  local mockdir
+  mockdir="$(mktemp -d)"
+  cat > "$mockdir/tput" <<'MOCK'
+#!/usr/bin/env bash
+printf '\033[?25l'
+MOCK
+  chmod +x "$mockdir/tput"
+
+  local saved_tput="$HAS_TPUT"
+  HAS_TPUT=1
+  local out
+  out=$(printf '\n' | PATH="$mockdir:$PATH" choose "Menu" "opcion" "desc" 2>/dev/null) || true
+  HAS_TPUT="$saved_tput"
+  rm -rf "$mockdir"
+
+  if [[ "$out" == *$'\e'* ]]; then
+    echo "el valor contiene secuencias de escape: $out"
+    return 1
+  fi
+  assert_eq "$out" "opcion" || return 1
 }
 
 # 22g. REGRESIÓN CRÍTICA: un check de red fallido NO debe abortar el script
@@ -817,6 +922,13 @@ run_test_group() {
   run_t "detect: url_host" t_detect_url_host
   run_t "detect: url_path" t_detect_url_path
   run_t "detect: flujo NO aborta el script" t_detect_flow_not_fatal
+  run_t "ui: el menú SE VE (stderr)" t_choose_menu_visible
+  run_t "ui: stdout solo trae el valor" t_choose_stdout_is_only_value
+  run_t "ui: flechas navegan el menú" t_choose_arrow_navigation
+  run_t "ui: flecha arriba" t_choose_arrow_up
+  run_t "ui: ESC cancela" t_choose_esc_cancels
+  run_t "ui: límites del menú" t_choose_stops_at_boundaries
+  run_t "ui: el valor NO trae escapes" t_choose_value_is_clean
 
   reset_state
   run_t "cache: round-trip" t_cdn_cache_roundtrip
@@ -831,6 +943,7 @@ run_test_group() {
   run_t "validate: playlist_title" t_validate_field_playlist_title
   run_t "validate: format_duration" t_format_duration_helper
   run_t "validate: config existe" t_preflight_deep_config_exists
+  run_t "init: crea el directorio de salida" t_init_creates_outdir
   run_t "validate: flujo NO aborta" t_validate_flow_not_fatal
 
   reset_state

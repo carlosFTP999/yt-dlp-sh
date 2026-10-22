@@ -56,7 +56,7 @@ declare -A CONFIG_DEFAULTS=(
 
 # Detectar capacidades de terminal
 if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
-  readonly HAS_TPUT=1
+  HAS_TPUT=1
   readonly BOLD="$(tput bold 2>/dev/null || echo '')"
   readonly DIM="$(tput dim 2>/dev/null || echo '')"
   readonly RED="$(tput setaf 1 2>/dev/null || echo '')"
@@ -67,7 +67,7 @@ if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
   readonly RESET="$(tput sgr0 2>/dev/null || echo '')"
   readonly CLEAR_LINE="$(tput el 2>/dev/null || echo '')"
 else
-  readonly HAS_TPUT=0
+  HAS_TPUT=0
   readonly BOLD="" DIM="" RED="" GREEN="" YELLOW="" BLUE="" CYAN="" RESET="" CLEAR_LINE=""
 fi
 
@@ -97,45 +97,52 @@ choose() {
   local -i sel=0
   local key
 
-  # Ocultar cursor
-  [[ $HAS_TPUT -eq 1 ]] && tput civis 2>/dev/null
+  # Ocultar cursor. A stderr: tput escribe a stdout y contaminaría el
+  # valor que choose() devuelve (el menú se invoca como $(choose ...)).
+  [[ $HAS_TPUT -eq 1 ]] && tput civis >&2 2>/dev/null
 
+  # IMPORTANTE: todo lo visual va a stderr.
+  # choose() se invoca como `choice=$(choose ...)`: si el menú se imprimiera
+  # a stdout, el command substitution lo capturaría y el usuario no vería
+  # NADA del menú. Solo el valor seleccionado se escribe a stdout.
   while true; do
-    clear
-    print_header "$prompt"
+    clear >&2
+    print_header "$prompt" >&2
     for ((i=0; i<${#opts[@]}; i+=2)); do
       local idx=$((i/2))
       if (( idx == sel )); then
-        printf "  ${CYAN}▸ %s${RESET} — %s\n" "${opts[i]}" "${opts[i+1]}"
+        printf "  ${CYAN}▸ %s${RESET} — %s\n" "${opts[i]}" "${opts[i+1]}" >&2
       else
-        printf "    %s — %s\n" "${opts[i]}" "${opts[i+1]}"
+        printf "    %s — %s\n" "${opts[i]}" "${opts[i+1]}" >&2
       fi
     done
-    printf "\n  ${DIM}↑/↓ navegar · Enter seleccionar · Esc cancelar${RESET}\n"
+    printf "\n  ${DIM}↑/↓ navegar · Enter seleccionar · Esc cancelar${RESET}\n" >&2
 
     IFS= read -rsn1 key
     case "$key" in
       $'\x1b')
-        # Leer siguiente byte para distinguir ESC solo vs secuencia
-        IFS= read -rsn1 -t 0.001 key2
-        if [[ -z "$key2" ]]; then
+        # Leer la secuencia de escape COMPLETA de una vez (2 bytes: '[' + letra).
+        # Con dos reads separados el byte '[' se pierde entre ellos y las
+        # flechas dejan de funcionar.
+        local rest=""
+        IFS= read -rsn2 -t 0.1 rest || true
+        if [[ -z "$rest" ]]; then
           # ESC presionado solo → cancelar
-          [[ $HAS_TPUT -eq 1 ]] && tput cnorm 2>/dev/null
+          [[ $HAS_TPUT -eq 1 ]] && tput cnorm >&2 2>/dev/null
           return 1
         fi
-        IFS= read -rsn1 -t 0.001 key3
-        case "${key2}${key3}" in
+        case "$rest" in
           '[A') if (( sel > 0 )); then sel=$((sel - 1)); fi ;;
           '[B') if (( sel < n_choices - 1 )); then sel=$((sel + 1)); fi ;;
         esac
         ;;
       '') # Enter
-        [[ $HAS_TPUT -eq 1 ]] && tput cnorm 2>/dev/null
+        [[ $HAS_TPUT -eq 1 ]] && tput cnorm >&2 2>/dev/null
         printf '%s' "${opts[sel*2]}"
         return 0
         ;;
       $'\x03') # Ctrl+C
-        [[ $HAS_TPUT -eq 1 ]] && tput cnorm 2>/dev/null
+        [[ $HAS_TPUT -eq 1 ]] && tput cnorm >&2 2>/dev/null
         die "Cancelado por usuario"
         ;;
     esac
@@ -521,6 +528,9 @@ format_duration() {
 
 init_config_dirs() {
   mkdir -p "$CONFIG_DIR"
+  # El directorio de salida debe existir para que df pueda medir el espacio
+  # (si no existe, el check de disco no puede informar nada)
+  mkdir -p "$OUTDIR" 2>/dev/null || true
   [[ -f "$CONFIG_FILE" ]] || touch "$CONFIG_FILE"
   [[ -f "$ARCHIVE_FILE" ]] || touch "$ARCHIVE_FILE"
   [[ -f "$HISTORY_FILE" ]] || touch "$HISTORY_FILE"
@@ -948,7 +958,7 @@ trap_cleanup() {
   for dir in "${TEMP_DIRS[@]}"; do
     [[ -d "$dir" ]] && rm -rf "$dir"
   done
-  [[ $HAS_TPUT -eq 1 ]] && tput cnorm 2>/dev/null
+  [[ $HAS_TPUT -eq 1 ]] && tput cnorm >&2 2>/dev/null
 }
 
 # ──────────────────────────────────────────────────────────────────────
