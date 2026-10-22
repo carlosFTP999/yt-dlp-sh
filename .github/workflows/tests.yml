@@ -32,7 +32,9 @@ jobs:
       - name: Install deno (JS runtime for YouTube)
         run: |
           curl -fsSL https://deno.land/install.sh | sh
+          # GITHUB_PATH only affects LATER steps, so export it here too
           echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.deno/bin:$PATH"
           deno --version
 
       - name: Shellcheck
