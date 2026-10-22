@@ -315,6 +315,32 @@ t_http_diagnose() {
   assert_contains "$reason" "ok" || return 1
 }
 
+# 22i. REGRESIÓN: el reintento debe resetear el código de error
+# Si el intento 1 falla (timeout) y el intento 2 tiene éxito (200),
+# el check debe reconocer el éxito. Antes: "YouTube NO accesible — ok (http=200)"
+t_check_retry_resets_rc() {
+  local mockdir count_file out rc=0
+  mockdir="$(mktemp -d)"
+  count_file="$mockdir/count"
+
+  cat > "$mockdir/curl" <<'MOCK'
+#!/usr/bin/env bash
+n=$(cat "$MOCK_COUNT_FILE" 2>/dev/null || echo 0)
+echo $((n + 1)) > "$MOCK_COUNT_FILE"
+if (( n == 0 )); then exit 28; fi
+printf '200'
+MOCK
+  chmod +x "$mockdir/curl"
+
+  out=$(PATH="$mockdir:$PATH" MOCK_COUNT_FILE="$count_file" \
+        check_youtube_reachable 2>&1) || rc=$?
+  rm -rf "$mockdir"
+
+  assert_eq "$rc" "0" || return 1
+  assert_not_contains "$out" "NO accesible" || return 1
+  return 0
+}
+
 # 22g. REGRESIÓN CRÍTICA: un check de red fallido NO debe abortar el script
 # Con set -euo pipefail, `var=$(cmd_fallido)` aborta el script entero.
 # Este test reproduce el contexto real (set -e activo) y exige que el
@@ -536,6 +562,7 @@ run_test_group() {
   run_t "conn: test CDN usa host real" t_cdn_check_function
   run_t "preflight: disco se mide de verdad" t_disk_space_measured
   run_t "preflight: fallo de red NO es fatal" t_network_failure_not_fatal
+  run_t "preflight: reintento resetea rc" t_check_retry_resets_rc
   run_t "preflight: df fallido NO es fatal" t_disk_check_not_fatal
   run_t "deps: yt-dlp/ffmpeg/curl" t_dependencies
 

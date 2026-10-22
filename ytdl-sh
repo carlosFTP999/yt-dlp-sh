@@ -447,6 +447,9 @@ check_youtube_reachable() {
   local attempt=1 code rc=1
 
   while (( attempt <= 2 )); do
+    # rc debe resetearse en cada intento: si no, un fallo previo
+    # invalida el éxito del reintento siguiente
+    rc=0
     code=$(curl -sI -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null) || rc=$?
     if (( rc == 0 )) && [[ "$code" =~ ^[23] ]]; then
       ok "YouTube accesible (http=$code)"
