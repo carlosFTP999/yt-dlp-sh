@@ -383,7 +383,7 @@ check_dependencies() {
   # yt-dlp
   command -v yt-dlp >/dev/null || die "yt-dlp no encontrado. Instala: pipx install yt-dlp / brew install yt-dlp / apt install yt-dlp"
   local ytdlp_ver
-  ytdlp_ver=$(yt-dlp --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  ytdlp_ver=$(yt-dlp --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) || ytdlp_ver=""
   [[ -n "$ytdlp_ver" ]] || die "No se pudo obtener versión de yt-dlp"
   # Comparar versión ≥ 2023.01 (año ≥ 2023)
   local year="${ytdlp_ver%%.*}"
@@ -392,7 +392,7 @@ check_dependencies() {
   # ffmpeg
   command -v ffmpeg >/dev/null || die "ffmpeg no encontrado. Instala: apt install ffmpeg / brew install ffmpeg"
   local ffmpeg_ver
-  ffmpeg_ver=$(ffmpeg -version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+  ffmpeg_ver=$(ffmpeg -version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1) || ffmpeg_ver=""
   [[ -n "$ffmpeg_ver" ]] || warn "No se pudo obtener versión de ffmpeg"
 
   # curl
@@ -405,32 +405,132 @@ check_dependencies() {
 # T3: PREFLIGHT CHECKS — Validación real de red y disco
 # ──────────────────────────────────────────────────────────────────────
 
+# Video de prueba para resolver el CDN real de YouTube.
+# Big Buck Bunny — trailer oficial de YouTube, estable y público.
+readonly PROBE_VIDEO_URL="https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+
+# Diagnostica por qué falló una petición HTTP
+# Uso: reason=$(http_diagnose "$url")
+http_diagnose() {
+  local url="$1"
+  local code rc
+  local code rc=0
+  # Con set -e, una asignación cuyo comando falla aborta el script:
+  # capturamos el código con "|| rc=$?" en vez de "$?" suelto
+  code=$(curl -sI -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null) || rc=$?
+
+  if (( rc == 0 )); then
+    if [[ "$code" =~ ^[23] ]]; then
+      printf 'ok (http=%s)' "$code"
+    else
+      printf 'http=%s (servidor respondió pero no 2xx/3xx)' "$code"
+    fi
+    return 0
+  fi
+
+  case "$rc" in
+    6)  printf 'DNS no resuelve el host' ;;
+    7)  printf 'conexión rechazada (¿firewall o proxy?)' ;;
+    28) printf 'timeout de 10s (red lenta o proxy saturado)' ;;
+    35|51|60) printf 'error SSL/TLS (proxy con intercepción sin CA, o bloqueo)' ;;
+    52|56) printf 'respuesta vacía o conexión caída (¿proxy cortando?)' ;;
+    *)  printf 'error de red (curl=%s)' "$rc" ;;
+  esac
+  return 1
+}
+
+# Verifica que YouTube responde (metadata de vídeo)
+# 2 intentos con 1s de espera: redes/proxies lentos fallan de forma transitoria
+check_youtube_reachable() {
+  # YT_CHECK_URL permite testear el caso de fallo (host inalcanzable)
+  local url="${YT_CHECK_URL:-https://www.youtube.com}"
+  local attempt=1 code rc=1
+
+  while (( attempt <= 2 )); do
+    code=$(curl -sI -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null) || rc=$?
+    if (( rc == 0 )) && [[ "$code" =~ ^[23] ]]; then
+      ok "YouTube accesible (http=$code)"
+      return 0
+    fi
+    (( attempt < 2 )) && sleep 1
+    attempt=$((attempt + 1))
+  done
+
+  warn "YouTube NO accesible — $(http_diagnose "$url")"
+  return 1
+}
+
+# Verifica el espacio disponible en el directorio de salida
+# Usa df -Pk (POSIX) en lugar de --output (GNU only) para portabilidad
+check_disk_space() {
+  local avail_kb=""
+  local line
+  line=$(df -Pk "$OUTDIR" 2>/dev/null | tail -1) || line=""
+  if [[ -n "$line" ]]; then
+    # Campos: Filesystem 1024-blocks Used Available Capacity Mounted-on
+    # IFS local a espacio: el IFS global del script es $'\n\t' y no separa campos
+    local IFS=' '
+    read -r _ _ _ avail_kb _ _ <<<"$line"
+  fi
+
+  if [[ -z "$avail_kb" ]]; then
+    dim "Espacio en disco: no se pudo medir (sigo adelante)"
+    return 0
+  fi
+
+  if (( avail_kb < 1048576 )); then  # < 1GB
+    warn "Espacio en disco < 1GB en $OUTDIR ($(( avail_kb / 1024 ))MB libres)"
+    return 1
+  fi
+
+  ok "Espacio en disco OK ($(( avail_kb / 1048576 ))GB libres en $OUTDIR)"
+  return 0
+}
+
+# Test bajo demanda del CDN de video real de YouTube.
+# Resuelve una URL de vídeo auténtica con yt-dlp -g y le pide un rango
+# pequeño al CDN. Es la única comprobación que refleja de verdad si las
+# descargas funcionan (el dominio apex googlevideo.com no es un host válido).
+check_cdn_reachable() {
+  print_header "TEST DE CONEXIÓN — CDN DE VIDEO"
+
+  info "Resolviendo URL real de video (yt-dlp -g)..."
+  local url host
+  url=$(timeout 30 yt-dlp -g -f "bv*" "$PROBE_VIDEO_URL" 2>/dev/null | head -1) || url=""
+  if [[ -z "$url" ]]; then
+    warn "No se pudo resolver la URL del video de prueba"
+    warn "  → YouTube puede estar bloqueado o el extractor falló"
+    return 1
+  fi
+
+  host=$(printf '%s' "$url" | sed -E 's#^https://([^/]+)/.*#\1#')
+  info "Host del CDN: $host"
+
+  # Rango pequeño: suficiente para probar la ruta sin descargar nada pesado
+  local code rc
+  local rc=0
+  code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 -r 0-100000 "$url" 2>/dev/null) || rc=$?
+
+  if (( rc == 0 )) && [[ "$code" =~ ^(200|206) ]]; then
+    ok "CDN de video accesible (http=$code) — las descargas deberían funcionar"
+    return 0
+  fi
+
+  if (( rc != 0 )); then
+    warn "CDN de video NO accesible — $(http_diagnose "$url")"
+  else
+    warn "CDN de video respondió http=$code (no 200/206)"
+  fi
+  warn "  → Si usás proxy corporativo: puede no alcanzar el CDN."
+  warn "  → Probá VPN, o configurá PROXY en Ajustes."
+  return 1
+}
+
 preflight_checks() {
   local warn_count=0
 
-  # YouTube
-  if timeout 3 curl -sI "https://www.youtube.com" >/dev/null 2>&1; then
-    ok "YouTube accesible"
-  else
-    warn "YouTube NO accesible — ¿red/proxy?"
-    warn_count=$((warn_count + 1))
-  fi
-
-  # googlevideo (CDN de video) — CRÍTICO para descargas
-  if timeout 3 curl -sI "https://googlevideo.com" >/dev/null 2>&1; then
-    ok "googlevideo (CDN) accesible"
-  else
-    warn "googlevideo NO accesible — las descargas FALLARÁN. ¿Proxy corporativo? Prueba VPN o --proxy"
-    warn_count=$((warn_count + 1))
-  fi
-
-  # Espacio disco
-  local avail_kb
-  avail_kb=$(df --output=avail "$OUTDIR" 2>/dev/null | tail -1 | tr -d ' ')
-  if [[ -n "$avail_kb" && "$avail_kb" -lt 1048576 ]]; then  # < 1GB en KB
-    warn "Espacio en disco < 1GB en $OUTDIR (${avail_kb}KB disponibles)"
-    warn_count=$((warn_count + 1))
-  fi
+  check_youtube_reachable || warn_count=$((warn_count + 1))
+  check_disk_space || warn_count=$((warn_count + 1))
 
   if (( warn_count > 0 )); then
     echo
@@ -867,10 +967,10 @@ queue_list() {
   local i=1
   for item in "${QUEUE[@]}"; do
     local id mode preset status
-    id=$(json_get "$item" "id")
-    mode=$(json_get "$item" "mode")
-    preset=$(json_get "$item" "preset")
-    status=$(json_get "$item" "status")
+    id=$(json_get "$item" "id" || true)
+    mode=$(json_get "$item" "mode" || true)
+    preset=$(json_get "$item" "preset" || true)
+    status=$(json_get "$item" "status" || true)
     printf "  %2d. [%s] %s | %s | %s\n" "$i" "$status" "$mode" "$preset" "$id"
     i=$((i + 1))
   done
@@ -1071,6 +1171,11 @@ MODOS
   Custom    URL + flags manuales de yt-dlp
   Cola      Gestionar múltiples descargas (añadir/listar/procesar)
 
+DIAGNÓSTICO
+  Test de conexión   Verifica YouTube + CDN de video real (googlevideo).
+                     Útil si tu proxy corporativo rompe las descargas.
+                     NO descarga nada: solo pide 100KB de un vídeo de prueba.
+
 PRESETS DE CALIDAD (Fase 2)
   Máxima        -S "res,br"
   Equilibrado   -S "res:1080,br"
@@ -1118,6 +1223,7 @@ main_menu() {
       "custom"   "URL + flags manuales de yt-dlp" \
       "queue"    "Cola de descargas (añadir/listar/procesar)" \
       "settings" "Ajustes y configuración" \
+      "conn"     "Test de conexión (YouTube + CDN de video)" \
       "help"     "Ayuda y atajos" \
       "exit"     "Salir")
 
@@ -1129,6 +1235,7 @@ main_menu() {
       custom)   mode_custom ;;
       queue)    queue_menu ;;
       settings) settings_menu ;;
+      conn)     check_cdn_reachable; ask "Presiona Enter para volver" "" >/dev/null ;;
       help)     help_screen ;;
       exit)     return 0 ;;
     esac

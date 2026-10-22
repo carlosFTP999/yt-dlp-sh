@@ -289,12 +289,88 @@ t_preflight_runs() {
   ( set -euo pipefail; preflight_checks <<< "y" >/dev/null 2>&1 )
 }
 
+# 22b. REGRESIÓN: preflight NO debe probar el apex googlevideo.com
+# (host inexistente con certificado SSL inválido → falso positivo permanente)
+t_preflight_no_apex_cdn() {
+  OUTDIR="$(mktemp -d)"
+  local out
+  out=$(preflight_checks <<< "y" 2>&1)
+  assert_not_contains "$out" "googlevideo" || return 1
+}
+
+# 22c. REGRESIÓN: el preflight usa timeout generoso, no 3s
+t_preflight_timeout_generous() {
+  # El fix usa --max-time 10 + reintento. Verificamos que no queda el 3s.
+  local body
+  body=$(sed -n '/^check_youtube_reachable()/,/^}/p' "$REPO_DIR/ytdl-sh")
+  assert_contains "$body" "max-time 10" || return 1
+  assert_not_contains "$body" "max-time 3" || return 1
+}
+
+# 22d. Diagnóstico por causa de error HTTP
+t_http_diagnose() {
+  local reason
+  reason=$(http_diagnose "https://www.youtube.com" 2>&1)
+  assert_nonempty "$reason" || return 1
+  assert_contains "$reason" "ok" || return 1
+}
+
+# 22g. REGRESIÓN CRÍTICA: un check de red fallido NO debe abortar el script
+# Con set -euo pipefail, `var=$(cmd_fallido)` aborta el script entero.
+# Este test reproduce el contexto real (set -e activo) y exige que el
+# diagnóstico se muestre y que el script llegue al final.
+t_network_failure_not_fatal() {
+  (
+    set -euo pipefail
+    local reason
+    reason=$(http_diagnose "https://host-inalcanzable.invalid" 2>&1) || true
+    [[ -n "$reason" ]] || { echo "diagnóstico vacío"; exit 1; }
+    # El preflight con host inalcanzable debe AVISAR, no morir en silencio
+    local out
+    out=$(YT_CHECK_URL="https://host-inalcanzable.invalid" check_youtube_reachable 2>&1) || true
+    [[ "$out" == *"NO accesible"* ]] || { echo "sin warning: $out"; exit 1; }
+    exit 0
+  )
+}
+
+# 22h. REGRESIÓN: check_disk_space no debe abortar si df falla
+t_disk_check_not_fatal() {
+  (
+    set -euo pipefail
+    OUTDIR="/ruta/que/no/existe/probablemente"
+    check_disk_space >/dev/null 2>&1 || true
+    exit 0
+  )
+}
+
+# 22f. REGRESIÓN: el check de disco debe MEDIR de verdad
+# (el IFS global del script rompía el read de campos de df)
+t_disk_space_measured() {
+  OUTDIR="$(mktemp -d)"
+  local out
+  out=$(check_disk_space 2>&1)
+  assert_not_contains "$out" "no se pudo medir" || return 1
+  assert_contains "$out" "GB libres" || return 1
+}
+
+# 22e. Test de conexión CDN existe y no usa el apex inválido
+t_cdn_check_function() {
+  # La función debe resolver el host real vía yt-dlp -g
+  local body
+  body=$(sed -n '/^check_cdn_reachable()/,/^}/p' "$REPO_DIR/ytdl-sh")
+  assert_contains "$body" "yt-dlp -g" || return 1
+  # Range pequeño: valida la ruta sin descargar nada pesado
+  assert_contains "$body" "0-100000" || return 1
+  # Nunca debe probar el apex inexistente
+  assert_not_contains "$body" 'https://googlevideo.com' || return 1
+}
+
 # 23. Preflight: aborta si usuario rechaza
 t_preflight_abort() {
   OUTDIR="$(mktemp -d)"
-  # Confirm "n" -> die -> exit 1
-  ( preflight_checks <<< "n" ) >/dev/null 2>&1
-  local rc=$?
+  # Host inalcanzable -> warning real -> confirm "n" -> die -> exit != 0
+  local rc=0
+  ( YT_CHECK_URL="https://host-inalcanzable.invalid" preflight_checks <<< "n" ) >/dev/null 2>&1 || rc=$?
   (( rc != 0 )) || return 1
 }
 
@@ -454,6 +530,13 @@ run_test_group() {
   reset_state
   run_t "preflight: corre sin crash" t_preflight_runs
   run_t "preflight: aborta si rechaza" t_preflight_abort
+  run_t "preflight: NO prueba apex googlevideo" t_preflight_no_apex_cdn
+  run_t "preflight: timeout generoso (10s)" t_preflight_timeout_generous
+  run_t "preflight: diagnóstico por causa" t_http_diagnose
+  run_t "conn: test CDN usa host real" t_cdn_check_function
+  run_t "preflight: disco se mide de verdad" t_disk_space_measured
+  run_t "preflight: fallo de red NO es fatal" t_network_failure_not_fatal
+  run_t "preflight: df fallido NO es fatal" t_disk_check_not_fatal
   run_t "deps: yt-dlp/ffmpeg/curl" t_dependencies
 
   reset_state
