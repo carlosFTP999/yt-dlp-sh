@@ -534,7 +534,7 @@ ffmpeg -i in.mp4 -vf "select='not(mod(n\,100))',scale=320:-1,tile=10x10" preview
 | **Autor** | Usuario + Gentle AI Orchestrator |
 | **Workflow** | Organic Driven Development (ODD) |
 | **Estado** | APROBADO — Ready for Phase 1 Implementation |
-| **Ubicación** | `/home/asus-i7/Dev/yt-dlp-shell/SPEC.md` |
+| **Ubicación** | `SPEC.md` (raíz del repositorio) |
 | **Proyecto Engram** | `yt-dlp-shell` (topic: `odd/ytdl-sh-core/tasks`) |
 
 ---
