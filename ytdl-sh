@@ -27,6 +27,8 @@ RATE_LIMIT="${RATE_LIMIT:-}"
 FORCE_IPV4="${FORCE_IPV4:-false}"
 YT_PLAYER_CLIENT="${YT_PLAYER_CLIENT:-}"
 NOTIFY_CMD="${NOTIFY_CMD:-}"
+PREFLIGHT_DEEP="${PREFLIGHT_DEEP:-auto}"   # auto | always | never
+VALIDATE_URL="${VALIDATE_URL:-false}"      # true = validar metadata al pegar URL
 
 # Dry-run flag (T2)
 DRY_RUN="${DRY_RUN:-false}"
@@ -44,6 +46,8 @@ declare -A CONFIG_DEFAULTS=(
   [FORCE_IPV4]="false"
   [YT_PLAYER_CLIENT]=""
   [NOTIFY_CMD]=""
+  [PREFLIGHT_DEEP]="auto"
+  [VALIDATE_URL]="false"
 )
 
 # ──────────────────────────────────────────────────────────────────────
@@ -327,6 +331,188 @@ type_label() {
 detect_banner() {
   local url="$1" tipo="$2" plataforma="$3"
   printf '  %s🔍 %s · %s%s\n' "$CYAN" "$plataforma" "$(type_label "$tipo")" "$RESET"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# T10: VALIDACIÓN DE URL + DEEP CDN CHECK CACHEADO
+# ──────────────────────────────────────────────────────────────────────
+
+# ── Cache del CDN ──
+readonly CDN_CACHE_FILE="$CONFIG_DIR/.cdn_cache"
+readonly CDN_CACHE_TTL=21600   # 6 horas en segundos
+
+# Lee el cache del CDN. Retorna "timestamp host status" o falla si no existe.
+cdn_cache_read() {
+  [[ -f "$CDN_CACHE_FILE" ]] || return 1
+  local line
+  line=$(head -1 "$CDN_CACHE_FILE" 2>/dev/null) || return 1
+  [[ -n "$line" ]] || return 1
+  printf '%s' "$line"
+}
+
+# Escribe el cache de forma atómica (temp + mv)
+cdn_cache_write() {
+  local host="$1" status="$2"
+  local tmp
+  tmp=$(mktemp "${CDN_CACHE_FILE}.XXXXXX") || return 1
+  printf '%s %s %s\n' "$(date +%s)" "$host" "$status" > "$tmp" && mv "$tmp" "$CDN_CACHE_FILE"
+}
+
+# Valida el cache: existe, es un éxito, y no venció el TTL.
+# Retorna el host cacheado o falla.
+cdn_cache_valid() {
+  local line ts host status now
+  line=$(cdn_cache_read) || return 1
+  IFS=' ' read -r ts host status <<<"$line" || true
+  [[ -n "$ts" && -n "$host" && "$status" == "ok" ]] || return 1
+  now=$(date +%s)
+  (( now - ts < CDN_CACHE_TTL )) || return 1
+  printf '%s' "$host"
+  return 0
+}
+
+# ── Validación de URL ──
+
+# Extrae un campo "CLAVE:valor" de la salida de yt-dlp --print
+# Toma solo la primera línea: los títulos pueden contener saltos de línea
+# y los valores pueden contener ":" (ej: "Video: Parte 2")
+# Uso: val=$(validate_field "$out" "TITULO")
+validate_field() {
+  local out="$1" key="$2"
+  printf '%s\n' "$out" | sed -n "s/^${key}://p" | head -1 | sed 's/^[[:space:]]*//'
+}
+
+# Valida una URL: metadata real (nivel 1)
+# Retorna: "TITULO|DURACION|CANTIDAD|EXTRACTOR"
+validate_url() {
+  local url="$1"
+  local tipo
+  IFS=' ' read -r tipo _ < <(detect_url "$url") || tipo="video"
+
+  # --flat-playlist evita expandir la lista (rápido).
+  # --playlist-items 1 es IMPRESCINDIBLE: sin él, yt-dlp imprime los
+  # --print una vez por cada item de la lista.
+  local -a args=(--simulate --no-warnings)
+  case "$tipo" in
+    video|shorts|live) ;;
+    *) args+=(--flat-playlist --playlist-items 1) ;;
+  esac
+
+  timeout 30 yt-dlp "${args[@]}" \
+        --print "TITULO:%(title)s" \
+        --print "PLTITULO:%(playlist_title)s" \
+        --print "DURACION:%(duration)s" \
+        --print "CANTIDAD:%(playlist_count)s" \
+        --print "EXTRACTOR:%(extractor_key)s" \
+        "$url" 2>&1
+}
+
+# Valida que el CDN de una URL específica sea alcanzable (nivel 2)
+# Reusa la técnica probada: yt-dlp -g con filtro de protocolo http
+# (evita manifests HLS, que no sirven para validar el CDN de video)
+validate_url_cdn() {
+  local url="$1"
+  local tipo
+  IFS=' ' read -r tipo _ < <(detect_url "$url") || tipo="video"
+
+  # Para playlists/canales, resolver solo el primer item (si no, yt-dlp
+  # resuelve la URL de los 40 videos y tarda mucho más)
+  local -a args=(-g -f "bv*[protocol^=http]")
+  case "$tipo" in
+    video|shorts|live) ;;
+    *) args+=(--playlist-items 1) ;;
+  esac
+
+  local direct
+  direct=$(timeout 30 yt-dlp "${args[@]}" "$url" 2>/dev/null | head -1) || direct=""
+  if [[ -z "$direct" ]]; then
+    warn "No se pudo resolver la URL directa del video (¿video no disponible?)"
+    return 1
+  fi
+
+  local host code rc=0
+  host=$(printf '%s' "$direct" | sed -E 's#^https://([^/]+)/.*#\1#')
+  code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 -r 0-100000 "$direct" 2>/dev/null) || rc=$?
+
+  if (( rc == 0 )) && [[ "$code" =~ ^(200|206) ]]; then
+    ok "CDN accesible (http=$code) — $host"
+    printf '%s' "$host"
+    return 0
+  fi
+
+  if (( rc != 0 )); then
+    warn "CDN NO accesible — $(http_diagnose "$direct")"
+  else
+    warn "CDN respondió http=$code (no 200/206)"
+  fi
+  return 1
+}
+
+# Muestra el resumen de validación de una URL
+show_validation() {
+  local url="$1"
+  print_header "VALIDACIÓN — $url"
+
+  info "Consultando metadata (yt-dlp --simulate)..."
+  local out rc=0
+  out=$(validate_url "$url") || rc=$?
+
+  if (( rc != 0 )); then
+    local err
+    err=$(printf '%s\n' "$out" | grep -m1 '^ERROR:' | sed 's/^ERROR:[[:space:]]*//')
+    [[ -n "$err" ]] || err="no se pudo validar la URL"
+    warn "La URL no es válida:"
+    printf '     %s\n' "$err"
+    echo
+    warn "No se puede descargar esto. Verificá el link o la disponibilidad."
+    return 1
+  fi
+
+  # Extraer campo por campo (sin separadores: los valores pueden contener "|")
+  local titulo pltitulo duracion cantidad extractor
+  pltitulo=$(validate_field "$out" "PLTITULO")
+  titulo=$(validate_field "$out" "TITULO")
+  duracion=$(validate_field "$out" "DURACION")
+  cantidad=$(validate_field "$out" "CANTIDAD")
+  extractor=$(validate_field "$out" "EXTRACTOR")
+
+  # Para playlists/canales, el título de la lista es el relevante
+  [[ -z "$pltitulo" || "$pltitulo" == "NA" ]] || titulo="$pltitulo"
+
+  # Los títulos pueden traer saltos de línea: en una línea se lee mejor
+  titulo="${titulo//$'\n'/ }"
+
+  [[ -n "$titulo" ]] && printf '  %sTítulo:%s   %s\n' "$BOLD" "$RESET" "$titulo"
+  [[ -n "$duracion" && "$duracion" != "NA" ]] && \
+    printf '  %sDuración:%s %s\n' "$BOLD" "$RESET" "$(format_duration "$duracion")"
+  [[ -n "$cantidad" && "$cantidad" != "NA" && "$cantidad" != "1" ]] && \
+    printf '  %sCantidad:%s %s videos\n' "$BOLD" "$RESET" "$cantidad"
+  [[ -n "$extractor" ]] && printf '  %sExtractor:%s %s\n' "$BOLD" "$RESET" "$extractor"
+  echo
+
+  # Nivel 2: CDN de esta URL específica
+  info "Verificando CDN de video (range 100KB, no descarga)..."
+  local host rc2=0
+  host=$(validate_url_cdn "$url") || rc2=$?
+
+  echo
+  if (( rc2 == 0 )); then
+    # Cacheamos el éxito: así los próximos arranques no repiten el deep check
+    cdn_cache_write "$host" "ok"
+    ok "Validación completa: se puede descargar ✓"
+  else
+    warn "Validación: la URL es correcta pero el CDN no responde."
+    warn "  → Si usás proxy corporativo, puede no alcanzar el CDN."
+    warn "  → Probá VPN o configurá PROXY en Ajustes."
+  fi
+  return 0
+}
+
+# Convierte segundos a HH:MM:SS
+format_duration() {
+  local secs="$1"
+  [[ "$secs" =~ ^[0-9]+$ ]] || { printf '%s' "$secs"; return; }
+  printf '%02d:%02d:%02d' $(( secs / 3600 )) $(( (secs % 3600) / 60 )) $(( secs % 60 ))
 }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -644,6 +830,7 @@ check_disk_space() {
 # Resuelve una URL de vídeo auténtica con yt-dlp -g y le pide un rango
 # pequeño al CDN. Es la única comprobación que refleja de verdad si las
 # descargas funcionan (el dominio apex googlevideo.com no es un host válido).
+CDN_HOST=""
 check_cdn_reachable() {
   print_header "TEST DE CONEXIÓN — CDN DE VIDEO"
 
@@ -666,6 +853,7 @@ check_cdn_reachable() {
 
   if (( rc == 0 )) && [[ "$code" =~ ^(200|206) ]]; then
     ok "CDN de video accesible (http=$code) — las descargas deberían funcionar"
+    CDN_HOST="$host"
     return 0
   fi
 
@@ -684,12 +872,55 @@ preflight_checks() {
 
   check_youtube_reachable || warn_count=$((warn_count + 1))
   check_disk_space || warn_count=$((warn_count + 1))
+  check_cdn_cached || warn_count=$((warn_count + 1))
 
   if (( warn_count > 0 )); then
     echo
     warn "Se detectaron $warn_count advertencia(s). ¿Continuar de todos modos?"
     confirm "Continuar?" || die "Abortado por usuario"
   fi
+}
+
+# Deep check del CDN con cache de 6 horas.
+#
+# PREFLIGHT_DEEP:
+#   auto   (default) — usa el cache si es válido; si no, hace el check y cachea
+#   always          — siempre hace el check (ignora el cache)
+#   never           — no hace el check
+#
+# Solo se cachean los ÉXITOS: si el CDN falla (proxy, VPN apagado),
+# el siguiente arranque reintenta, así al prender el VPN se recupera al toque.
+check_cdn_cached() {
+  case "${PREFLIGHT_DEEP:-auto}" in
+    never)
+      dim "Deep check del CDN: desactivado (PREFLIGHT_DEEP=never)"
+      return 0
+      ;;
+    auto)
+      local cached_host
+      if cached_host=$(cdn_cache_valid); then
+        local line ts
+        line=$(cdn_cache_read) || true
+        IFS=' ' read -r ts _ _ <<<"$line" || true
+        local mins=$(( ( $(date +%s) - ts ) / 60 ))
+        ok "CDN de video accesible (cacheado hace ${mins} min): $cached_host"
+        return 0
+      fi
+      info "Verificando CDN de video por primera vez (~9s)..."
+      ;;
+    always)
+      info "Verificando CDN de video (PREFLIGHT_DEEP=always)..."
+      ;;
+  esac
+
+  if check_cdn_reachable; then
+    [[ -n "$CDN_HOST" ]] && cdn_cache_write "$CDN_HOST" "ok"
+    return 0
+  fi
+
+  # No cacheamos el fallo a propósito: el próximo arranque reintenta
+  dim "No se cachea el fallo; se reintentará en el próximo arranque"
+  return 1
 }
 
 load_queue() {
@@ -886,6 +1117,12 @@ auto_detect_mode() {
   else
     modo=$(type_to_mode "$tipo")
     info "Modo seleccionado: $modo"
+  fi
+
+  # Validación automática (opt-in con VALIDATE_URL=true)
+  if [[ "${VALIDATE_URL:-false}" == "true" ]]; then
+    echo
+    show_validation "$url" || true
   fi
 
   echo
@@ -1345,6 +1582,27 @@ queue_clear() {
 }
 
 # ──────────────────────────────────────────────────────────────────────
+# MENÚ: VALIDAR URL
+# ──────────────────────────────────────────────────────────────────────
+validate_url_menu() {
+  print_header "VALIDAR UNA URL"
+  local url
+  url=$(ask "URL a validar")
+  if [[ -z "$url" ]]; then
+    warn "URL vacía"
+    return 1
+  fi
+
+  local tipo plataforma
+  IFS=' ' read -r tipo plataforma < <(detect_url "$url") || true
+  detect_banner "$url" "$tipo" "$plataforma"
+  echo
+
+  show_validation "$url"
+  ask "Presiona Enter para volver" "" >/dev/null
+}
+
+# ──────────────────────────────────────────────────────────────────────
 # SETTINGS / HELP
 # ──────────────────────────────────────────────────────────────────────
 settings_menu() {
@@ -1368,6 +1626,8 @@ settings_menu() {
       "FORCE_IPV4"    "Forzar IPv4 (true/false)" \
       "YT_PLAYER_CLIENT" "YouTube player client (android/web/mweb/tv_embed)" \
       "NOTIFY_CMD"    "Comando notificación custom (ej: notify-send 'title' 'body')" \
+      "PREFLIGHT_DEEP" "Deep check CDN: auto (cache 6h) | always | never" \
+      "VALIDATE_URL"  "Validar URL automáticamente al pegarla (true/false)" \
       "save"          "Guardar y volver" \
       "reset"         "Restaurar defaults" \
       "back"          "Volver sin guardar")
@@ -1425,6 +1685,9 @@ DIAGNÓSTICO
   Test de conexión   Verifica YouTube + CDN de video real (googlevideo).
                      Útil si tu proxy corporativo rompe las descargas.
                      NO descarga nada: solo pide 100KB de un vídeo de prueba.
+  Validar una URL    Comprueba que la URL existe y que su CDN responde.
+                     Muestra el título real, duración y cantidad de vídeos.
+                     Ideal antes de descargar una lista grande.
 
 PRESETS DE CALIDAD (Fase 2)
   Máxima        -S "res,br"
@@ -1475,6 +1738,7 @@ main_menu() {
       "queue"    "Cola de descargas (añadir/listar/procesar)" \
       "settings" "Ajustes y configuración" \
       "conn"     "Test de conexión (YouTube + CDN de video)" \
+      "validate" "Validar una URL (¿se puede descargar?)" \
       "help"     "Ayuda y atajos" \
       "exit"     "Salir")
 
@@ -1488,6 +1752,7 @@ main_menu() {
       queue)    queue_menu ;;
       settings) settings_menu ;;
       conn)     check_cdn_reachable; ask "Presiona Enter para volver" "" >/dev/null ;;
+      validate) validate_url_menu ;;
       help)     help_screen ;;
       exit)     return 0 ;;
     esac

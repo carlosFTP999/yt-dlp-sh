@@ -295,7 +295,10 @@ t_preflight_no_apex_cdn() {
   OUTDIR="$(mktemp -d)"
   local out
   out=$(preflight_checks <<< "y" 2>&1)
-  assert_not_contains "$out" "googlevideo" || return 1
+  # El apex googlevideo.com no es un host válido: nunca debe probarse.
+  # (los hosts reales rr*---sn-*.googlevideo.com sí son legítimos)
+  assert_not_contains "$out" "https://googlevideo.com" || return 1
+  assert_not_contains "$out" '"https://googlevideo.com"' || return 1
 }
 
 # 22c. REGRESIÓN: el preflight usa timeout generoso, no 3s
@@ -455,6 +458,131 @@ t_detect_flow_not_fatal() {
     IFS=' ' read -r tipo plataforma < <(detect_url "https://www.youtube.com/playlist?list=PLabc") || true
     [[ "$tipo" == "playlist" ]] || { echo "tipo=$tipo"; exit 1; }
     [[ "$plataforma" == "youtube" ]] || { echo "plataforma=$plataforma"; exit 1; }
+    exit 0
+  )
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# T10: CACHE DEL CDN + VALIDACIÓN DE URL
+# ══════════════════════════════════════════════════════════════════════
+
+t_cdn_cache_roundtrip() {
+  rm -f "$CDN_CACHE_FILE"
+  cdn_cache_write "rr1---sn-test.googlevideo.com" "ok"
+  assert_file_exists "$CDN_CACHE_FILE" || return 1
+  local host
+  host=$(cdn_cache_valid) || return 1
+  assert_eq "$host" "rr1---sn-test.googlevideo.com" || return 1
+}
+
+t_cdn_cache_ttl_expired() {
+  rm -f "$CDN_CACHE_FILE"
+  # Timestamp de hace 7 horas (> TTL de 6h)
+  local old_ts=$(( $(date +%s) - 25200 ))
+  printf '%s %s %s\n' "$old_ts" "rr1---sn-test.googlevideo.com" "ok" > "$CDN_CACHE_FILE"
+  cdn_cache_valid && return 1
+  return 0
+}
+
+t_cdn_cache_ttl_valid() {
+  rm -f "$CDN_CACHE_FILE"
+  local now_ts=$(date +%s)
+  printf '%s %s %s\n' "$now_ts" "rr1---sn-test.googlevideo.com" "ok" > "$CDN_CACHE_FILE"
+  local host
+  host=$(cdn_cache_valid) || return 1
+  assert_eq "$host" "rr1---sn-test.googlevideo.com" || return 1
+}
+
+t_cdn_cache_failure_not_cached() {
+  # Un fallo NO debe quedar cacheado: el próximo arranque debe reintentar
+  rm -f "$CDN_CACHE_FILE"
+  local old_ts=$(( $(date +%s) - 300 ))
+  printf '%s %s %s\n' "$old_ts" "rr1---sn-test.googlevideo.com" "fail" > "$CDN_CACHE_FILE"
+  cdn_cache_valid && return 1
+  return 0
+}
+
+t_cdn_cache_corrupt_ignored() {
+  rm -f "$CDN_CACHE_FILE"
+  printf 'basura no parseable\n' > "$CDN_CACHE_FILE"
+  cdn_cache_valid && return 1
+  # Escritura corrupta: al reescribir debe quedar bien
+  cdn_cache_write "host-test" "ok"
+  local host
+  host=$(cdn_cache_valid) || return 1
+  assert_eq "$host" "host-test" || return 1
+}
+
+t_cdn_cached_never_skips() {
+  PREFLIGHT_DEEP="never"
+  local out
+  out=$(check_cdn_cached 2>&1)
+  assert_contains "$out" "desactivado" || return 1
+  PREFLIGHT_DEEP="auto"
+}
+
+t_cdn_cached_uses_cache_no_network() {
+  # Con cache válido, el deep check NO debe hacer red
+  rm -f "$CDN_CACHE_FILE"
+  cdn_cache_write "rr9---sn-cached.googlevideo.com" "ok"
+  PREFLIGHT_DEEP="auto"
+  local out
+  out=$(check_cdn_cached 2>&1)
+  assert_contains "$out" "cacheado" || return 1
+  assert_contains "$out" "rr9---sn-cached.googlevideo.com" || return 1
+}
+
+t_validate_field_parser() {
+  local out="TITULO:Mi Video
+DURACION:870
+CANTIDAD:40
+EXTRACTOR:Youtube"
+  assert_eq "$(validate_field "$out" "TITULO")" "Mi Video" || return 1
+  assert_eq "$(validate_field "$out" "DURACION")" "870" || return 1
+  assert_eq "$(validate_field "$out" "CANTIDAD")" "40" || return 1
+  assert_eq "$(validate_field "$out" "EXTRACTOR")" "Youtube" || return 1
+  # Título con dos puntos → debe conservar el resto
+  assert_eq "$(validate_field "TITULO:Video: Parte 2" "TITULO")" "Video: Parte 2" || return 1
+}
+
+t_validate_field_playlist_title() {
+  local out="TITULO:Video | Parte 1
+PLTITULO:Mi Playlist
+DURACION:601
+CANTIDAD:40
+EXTRACTOR:Youtube"
+  assert_eq "$(validate_field "$out" "PLTITULO")" "Mi Playlist" || return 1
+  assert_eq "$(validate_field "$out" "CANTIDAD")" "40" || return 1
+  # Título con "|" debe conservarse completo
+  assert_eq "$(validate_field "$out" "TITULO")" "Video | Parte 1" || return 1
+}
+
+t_validate_field_missing() {
+  assert_eq "$(validate_field "OTRA:1" "TITULO")" "" || return 1
+}
+
+t_format_duration_helper() {
+  assert_eq "$(format_duration 870)" "00:14:30" || return 1
+  assert_eq "$(format_duration 3600)" "01:00:00" || return 1
+  assert_eq "$(format_duration 59)" "00:00:59" || return 1
+  assert_eq "$(format_duration "NA")" "NA" || return 1
+}
+
+t_preflight_deep_config_exists() {
+  # PREFLIGHT_DEEP y VALIDATE_URL deben existir en CONFIG_DEFAULTS
+  assert_eq "${CONFIG_DEFAULTS[PREFLIGHT_DEEP]}" "auto" || return 1
+  assert_eq "${CONFIG_DEFAULTS[VALIDATE_URL]}" "false" || return 1
+}
+
+t_validate_flow_not_fatal() {
+  # El flujo de validación no debe abortar el script (con set -e real)
+  (
+    set -euo pipefail
+    local out rc=0
+    out=$(validate_url "https://www.youtube.com/watch?v=BaW_jenozKc") || rc=$?
+    # Puede fallar (video no disponible) o funcionar; en ambos casos
+    # debe devolver algo y no abortar el script
+    [[ -n "$out" ]] || { echo "salida vacía"; exit 1; }
     exit 0
   )
 }
@@ -689,6 +817,21 @@ run_test_group() {
   run_t "detect: url_host" t_detect_url_host
   run_t "detect: url_path" t_detect_url_path
   run_t "detect: flujo NO aborta el script" t_detect_flow_not_fatal
+
+  reset_state
+  run_t "cache: round-trip" t_cdn_cache_roundtrip
+  run_t "cache: TTL vencido" t_cdn_cache_ttl_expired
+  run_t "cache: TTL válido" t_cdn_cache_ttl_valid
+  run_t "cache: fallo NO se cachea" t_cdn_cache_failure_not_cached
+  run_t "cache: corrupto se ignora" t_cdn_cache_corrupt_ignored
+  run_t "cache: PREFLIGHT_DEEP=never" t_cdn_cached_never_skips
+  run_t "cache: válido no hace red" t_cdn_cached_uses_cache_no_network
+  run_t "validate: parser de campos" t_validate_field_parser
+  run_t "validate: campo ausente" t_validate_field_missing
+  run_t "validate: playlist_title" t_validate_field_playlist_title
+  run_t "validate: format_duration" t_format_duration_helper
+  run_t "validate: config existe" t_preflight_deep_config_exists
+  run_t "validate: flujo NO aborta" t_validate_flow_not_fatal
 
   reset_state
   run_t "preflight: fallo de red NO es fatal" t_network_failure_not_fatal
