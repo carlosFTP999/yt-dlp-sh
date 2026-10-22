@@ -1,0 +1,48 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: Smoke tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install yt-dlp (latest release)
+        run: |
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+            -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+          yt-dlp --version
+
+      - name: Install ffmpeg and curl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg curl
+          ffmpeg -version | head -1
+
+      - name: Install deno (JS runtime for YouTube)
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+          deno --version
+
+      - name: Shellcheck
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck --severity=warning --external-sources ytdl-sh \
+            || echo "::warning::shellcheck reported findings"
+
+      - name: Bash syntax check
+        run: bash -n ytdl-sh
+
+      - name: Run smoke tests
+        run: ./tests/smoke-test.sh --verbose
