@@ -341,6 +341,124 @@ MOCK
   return 0
 }
 
+# ══════════════════════════════════════════════════════════════════════
+# T9: DETECCIÓN DE URL — tabla de patrones
+# ══════════════════════════════════════════════════════════════════════
+
+# Helper: verifica que detect_url devuelve "tipo plataforma"
+assert_detect() {
+  local url="$1" exp_tipo="$2" exp_plat="$3"
+  local tipo plataforma
+  IFS=' ' read -r tipo plataforma < <(detect_url "$url")
+  assert_eq "$tipo" "$exp_tipo" || return 1
+  assert_eq "$plataforma" "$exp_plat" || return 1
+  return 0
+}
+
+t_detect_youtube_patterns() {
+  # playlist
+  assert_detect "https://www.youtube.com/playlist?list=PLabc123" "playlist" "youtube" || return 1
+  # watch simple
+  assert_detect "https://www.youtube.com/watch?v=BaW_jenozKc" "video" "youtube" || return 1
+  # watch dentro de playlist (ambiguo)
+  assert_detect "https://www.youtube.com/watch?v=BaW_jenozKc&list=PLabc123" "video_in_playlist" "youtube" || return 1
+  # youtu.be
+  assert_detect "https://youtu.be/BaW_jenozKc" "video" "youtube" || return 1
+  # shorts
+  assert_detect "https://www.youtube.com/shorts/BaW_jenozKc" "shorts" "youtube" || return 1
+  # live
+  assert_detect "https://www.youtube.com/live/BaW_jenozKc" "live" "youtube" || return 1
+  # embed
+  assert_detect "https://www.youtube.com/embed/BaW_jenozKc" "video" "youtube" || return 1
+  # handle
+  assert_detect "https://www.youtube.com/@midudev" "channel" "youtube" || return 1
+  # channel
+  assert_detect "https://www.youtube.com/channel/UCabcdefghijklmnop" "channel" "youtube" || return 1
+  # /c/
+  assert_detect "https://www.youtube.com/c/midudev" "channel" "youtube" || return 1
+  # /user/
+  assert_detect "https://www.youtube.com/user/midudev" "channel" "youtube" || return 1
+  # mobile
+  assert_detect "https://m.youtube.com/watch?v=BaW_jenozKc" "video" "youtube" || return 1
+}
+
+t_detect_youtube_uploads() {
+  # list=UU... → uploads del propio canal
+  assert_detect "https://www.youtube.com/playlist?list=UUabc123" "uploads" "youtube" || return 1
+  # list=PL... → playlist normal
+  assert_detect "https://www.youtube.com/playlist?list=PLabc123" "playlist" "youtube" || return 1
+}
+
+t_detect_other_platforms() {
+  assert_detect "https://www.tiktok.com/@user/video/123" "video" "tiktok" || return 1
+  assert_detect "https://vimeo.com/123456" "video" "vimeo" || return 1
+  assert_detect "https://twitter.com/user/status/123" "video" "twitter" || return 1
+  assert_detect "https://x.com/user/status/123" "video" "twitter" || return 1
+  assert_detect "https://www.instagram.com/p/ABC/" "video" "instagram" || return 1
+  assert_detect "https://www.soundcloud.com/artist/track" "audio" "soundcloud" || return 1
+  assert_detect "https://www.twitch.tv/videos" "channel" "twitch" || return 1
+}
+
+t_detect_unknown_platform() {
+  # Plataforma desconocida → devuelve el dominio como label
+  assert_detect "https://mi-sitio.example/video/1" "video" "mi-sitio.example" || return 1
+}
+
+t_detect_type_to_mode() {
+  assert_eq "$(type_to_mode playlist)" "playlist" || return 1
+  assert_eq "$(type_to_mode video_in_playlist)" "playlist" || return 1
+  assert_eq "$(type_to_mode channel)" "channel" || return 1
+  assert_eq "$(type_to_mode uploads)" "channel" || return 1
+  assert_eq "$(type_to_mode shorts)" "video" || return 1
+  assert_eq "$(type_to_mode live)" "video" || return 1
+  assert_eq "$(type_to_mode video)" "video" || return 1
+  assert_eq "$(type_to_mode audio)" "audio" || return 1
+}
+
+t_detect_extract_playlist_id() {
+  assert_eq "$(extract_playlist_id "https://www.youtube.com/playlist?list=PLabc123")" "PLabc123" || return 1
+  assert_eq "$(extract_playlist_id "https://www.youtube.com/watch?v=X&list=PLxyz789")" "PLxyz789" || return 1
+  assert_eq "$(extract_playlist_id "https://www.youtube.com/watch?v=X")" "" || return 1
+}
+
+t_detect_no_network() {
+  # La detección NO debe hacer red: url_host/url_path son parseo puro
+  local body
+  body=$(sed -n '/^detect_url()/,/^}/p' "$REPO_DIR/ytdl-sh")
+  assert_not_contains "$body" "curl " || return 1
+  assert_not_contains "$body" "yt-dlp" || return 1
+}
+
+t_detect_url_host() {
+  assert_eq "$(url_host "https://www.youtube.com/watch?v=X")" "youtube.com" || return 1
+  assert_eq "$(url_host "https://youtu.be/X")" "youtu.be" || return 1
+  assert_eq "$(url_host "http://m.youtube.com/x")" "m.youtube.com" || return 1
+  assert_eq "$(url_host "https://user:pw@site.com/x")" "site.com" || return 1
+}
+
+t_detect_url_path() {
+  assert_eq "$(url_path "https://www.youtube.com/playlist?list=X")" "/playlist" || return 1
+  assert_eq "$(url_path "https://www.youtube.com/watch?v=X")" "/watch" || return 1
+  assert_eq "$(url_path "https://youtu.be/X")" "/X" || return 1
+  assert_eq "$(url_path "https://youtube.com")" "" || return 1
+}
+
+# 22j. REGRESIÓN: el flujo de detección NO debe abortar el script
+# Con set -e, `read` que llega a EOF sin newline devuelve 1 y aborta.
+# Además, dentro de `if "$fn"` el set -e está desactivado, así que este
+# test DEBE correr en un subshell con set -e explícito para ser fiel
+# al contexto de producción.
+t_detect_flow_not_fatal() {
+  (
+    set -euo pipefail
+    local tipo plataforma
+    IFS=' ' read -r tipo plataforma < <(detect_url "https://www.youtube.com/playlist?list=PLabc") || true
+    [[ "$tipo" == "playlist" ]] || { echo "tipo=$tipo"; exit 1; }
+    [[ "$plataforma" == "youtube" ]] || { echo "plataforma=$plataforma"; exit 1; }
+    exit 0
+  )
+}
+
 # 22g. REGRESIÓN CRÍTICA: un check de red fallido NO debe abortar el script
 # Con set -euo pipefail, `var=$(cmd_fallido)` aborta el script entero.
 # Este test reproduce el contexto real (set -e activo) y exige que el
@@ -561,6 +679,18 @@ run_test_group() {
   run_t "preflight: diagnóstico por causa" t_http_diagnose
   run_t "conn: test CDN usa host real" t_cdn_check_function
   run_t "preflight: disco se mide de verdad" t_disk_space_measured
+  run_t "detect: patrones YouTube" t_detect_youtube_patterns
+  run_t "detect: uploads vs playlist" t_detect_youtube_uploads
+  run_t "detect: otras plataformas" t_detect_other_platforms
+  run_t "detect: plataforma desconocida" t_detect_unknown_platform
+  run_t "detect: type_to_mode" t_detect_type_to_mode
+  run_t "detect: extract_playlist_id" t_detect_extract_playlist_id
+  run_t "detect: no hace red" t_detect_no_network
+  run_t "detect: url_host" t_detect_url_host
+  run_t "detect: url_path" t_detect_url_path
+  run_t "detect: flujo NO aborta el script" t_detect_flow_not_fatal
+
+  reset_state
   run_t "preflight: fallo de red NO es fatal" t_network_failure_not_fatal
   run_t "preflight: reintento resetea rc" t_check_retry_resets_rc
   run_t "preflight: df fallido NO es fatal" t_disk_check_not_fatal

@@ -180,6 +180,156 @@ confirm() {
 }
 
 # ──────────────────────────────────────────────────────────────────────
+# T9: DETECCIÓN DE URL — tipo de contenido + plataforma (bash puro, offline)
+# ──────────────────────────────────────────────────────────────────────
+
+# Extrae el host de una URL (sin esquema, sin userinfo, sin www, minúsculas)
+url_host() {
+  local host="$1"
+  host="${host#*://}"      # quita esquema
+  host="${host%%/*}"      # quita path
+  host="${host%%\?*}"     # quita query
+  host="${host#*@}"       # quita userinfo
+  host="${host,,}"        # minúsculas
+  host="${host#www.}"     # quita www.
+  printf '%s' "$host"
+}
+
+# Extrae el path de una URL (sin query ni fragment)
+url_path() {
+  local path="$1"
+  path="${path#*://}"     # quita esquema
+  path="${path#*${path%%/*}}"  # quita host
+  path="${path%%\?*}"     # quita query
+  path="${path%%#*}"      # quita fragment
+  printf '%s' "$path"
+}
+
+# Extrae el ID de playlist (list=...) de una URL
+# Retorna: ID o cadena vacía
+extract_playlist_id() {
+  local url="$1"
+  if [[ "$url" =~ list=([A-Za-z0-9_-]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+}
+
+# Detecta tipo de contenido y plataforma de una URL
+# Retorna: "TIPO PLATAFORMA"  (ej: "playlist youtube")
+#
+# TIPO: video | video_in_playlist | playlist | shorts | live | channel
+#       | uploads | audio | unknown
+# PLATAFORMA: youtube | tiktok | vimeo | twitter | ... | <dominio>
+#
+# No hace red: parseo puro de patrones (instantáneo, offline).
+detect_url() {
+  local url="$1"
+  local host path tipo="video" plataforma="generic"
+
+  host=$(url_host "$url")
+  path=$(url_path "$url")
+
+  # ── Plataforma ──
+  case "$host" in
+    youtube.com|youtu.be|m.youtube.com|music.youtube.com|gaming.youtube.com|nocookie.com)
+      plataforma="youtube" ;;
+    tiktok.com)              plataforma="tiktok" ;;
+    twitter.com|x.com)       plataforma="twitter" ;;
+    instagram.com)            plataforma="instagram" ;;
+    facebook.com|fb.watch)   plataforma="facebook" ;;
+    vimeo.com)               plataforma="vimeo" ;;
+    twitch.tv)               plataforma="twitch" ;;
+    reddit.com|redd.it)      plataforma="reddit" ;;
+    soundcloud.com)          plataforma="soundcloud" ;;
+    bandcamp.com)            plataforma="bandcamp" ;;
+    bilibili.com|b23.tv)     plataforma="bilibili" ;;
+    dailymotion.com|dai.ly)  plataforma="dailymotion" ;;
+    odysee.com)              plataforma="odysee" ;;
+    rumble.com)              plataforma="rumble" ;;
+    linkedin.com)            plataforma="linkedin" ;;
+    vk.com)                  plataforma="vk" ;;
+    *.youtube.com)           plataforma="youtube" ;;
+    "")                      plataforma="desconocida" ;;
+    *)                       plataforma="$host" ;;
+  esac
+
+  # ── Tipo ──
+  case "$plataforma" in
+    youtube)
+      if [[ "$path" == *"/playlist"* ]]; then
+        # list=UU/LL/FL → lista de uploads del propio canal
+        local plid
+        plid=$(extract_playlist_id "$url")
+        case "$plid" in
+          UU*|LL*|FL*) tipo="uploads" ;;
+          *)            tipo="playlist" ;;
+        esac
+      elif [[ "$path" == *"/shorts/"* ]]; then
+        tipo="shorts"
+      elif [[ "$path" == *"/live/"* ]]; then
+        tipo="live"
+      elif [[ "$path" == *"/embed/"* ]]; then
+        tipo="video"
+      elif [[ "$path" == *"/watch"* || "$host" == "youtu.be" ]]; then
+        if [[ "$url" == *"list="* ]]; then
+          tipo="video_in_playlist"   # ambiguo: video O playlist completa
+        else
+          tipo="video"
+        fi
+      elif [[ "$path" == "/@"* || "$path" == "/c/"* || "$path" == "/channel/"* \
+              || "$path" == "/user/"* || "$path" == "/u/"* ]]; then
+        tipo="channel"
+      fi
+      ;;
+    twitch)
+      if [[ "$path" == *"/videos"* || "$path" == *"/streams"* || "$path" == "/popout/"* ]]; then
+        tipo="channel"
+      fi
+      ;;
+    soundcloud|bandcamp)
+      tipo="audio"
+      ;;
+  esac
+
+  # Newline final: read devuelve 1 al llegar a EOF sin delimitador
+  # (con set -e eso abortaría el script)
+  printf '%s %s\n' "$tipo" "$plataforma"
+}
+
+# Mapea el tipo detectado al modo de descarga correspondiente
+type_to_mode() {
+  case "$1" in
+    playlist|video_in_playlist) printf 'playlist' ;;
+    channel|uploads)            printf 'channel' ;;
+    shorts|live|video)          printf 'video' ;;
+    audio)                      printf 'audio' ;;
+    *)                          printf 'video' ;;
+  esac
+}
+
+# Etiqueta legible del tipo detectado
+type_label() {
+  case "$1" in
+    video)             printf 'Video' ;;
+    video_in_playlist) printf 'Video dentro de una playlist' ;;
+    playlist)          printf 'Playlist' ;;
+    shorts)            printf 'Short' ;;
+    live)              printf 'Directo (live)' ;;
+    channel)           printf 'Canal' ;;
+    uploads)           printf 'Uploads de canal' ;;
+    audio)             printf 'Audio' ;;
+    unknown)           printf 'Contenido' ;;
+    *)                 printf 'Video' ;;
+  esac
+}
+
+# Banner de detección (informativo, no bloqueante)
+detect_banner() {
+  local url="$1" tipo="$2" plataforma="$3"
+  printf '  %s🔍 %s · %s%s\n' "$CYAN" "$plataforma" "$(type_label "$tipo")" "$RESET"
+}
+
+# ──────────────────────────────────────────────────────────────────────
 # STUBS — Para ser implementados en T4, T6, T7
 # ──────────────────────────────────────────────────────────────────────
 
@@ -673,14 +823,92 @@ build_output_template() {
   esac
 }
 
+# Avisa si el tipo detectado no corresponde al modo elegido.
+# No bloquea: el usuario siempre puede confirmar o cancelar.
+# Uso: warn_if_unexpected_type "$url" "video"
+warn_if_unexpected_type() {
+  local url="$1" modo_esperado="$2"
+  local tipo plataforma
+  IFS=' ' read -r tipo plataforma < <(detect_url "$url") || true
+
+  case "$tipo" in
+    video|shorts|live) return 0 ;;   # coherente con modo video
+  esac
+
+  # audio: un video también es aceptable (se extrae el audio)
+  [[ "$modo_esperado" == "audio" ]] && return 0
+
+  warn "Ojo: la URL es de tipo '$(type_label "$tipo")' ($plataforma), no de tipo '$modo_esperado'"
+  local detectado
+  detectado=$(type_to_mode "$tipo")
+  if [[ "$detectado" != "$modo_esperado" ]]; then
+    info "El modo '$detectado' encajaría mejor con esta URL"
+  fi
+  confirm "¿Continuar con el modo '$modo_esperado'?" || return 1
+  return 0
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# MODO: AUTO — Detecta tipo y plataforma, elige el modo
+# ──────────────────────────────────────────────────────────────────────
+auto_detect_mode() {
+  print_header "DETECCIÓN AUTOMÁTICA"
+
+  local url
+  url=$(ask "Pega la URL")
+  [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+
+  local tipo plataforma modo
+  IFS=' ' read -r tipo plataforma < <(detect_url "$url") || true
+  detect_banner "$url" "$tipo" "$plataforma"
+  echo
+
+  # ── Caso ambiguo: video dentro de una playlist ──
+  if [[ "$tipo" == "video_in_playlist" ]]; then
+    warn "Esta URL es un video QUE PERTECE a una playlist."
+    warn "yt-dlp por defecto descargaría SOLO el video."
+    echo
+    local choice
+    choice=$(choose "¿Qué querés descargar?" \
+      "video"    "Solo este video" \
+      "playlist" "La playlist completa")
+    modo="$choice"
+    if [[ "$modo" == "playlist" ]]; then
+      local plid
+      plid=$(extract_playlist_id "$url")
+      if [[ -n "$plid" ]]; then
+        url="https://www.youtube.com/playlist?list=$plid"
+        info "Usando URL de playlist: $url"
+      else
+        warn "No se pudo extraer el ID de la playlist; se usará la URL original"
+      fi
+    fi
+  else
+    modo=$(type_to_mode "$tipo")
+    info "Modo seleccionado: $modo"
+  fi
+
+  echo
+  case "$modo" in
+    video)    mode_video "$url" ;;
+    audio)    mode_audio "$url" ;;
+    playlist) mode_playlist "$url" ;;
+    channel)  mode_channel "$url" ;;
+    *)        mode_custom "$url" ;;
+  esac
+}
+
 # ──────────────────────────────────────────────────────────────────────
 # MODO: VIDEO
 # ──────────────────────────────────────────────────────────────────────
 mode_video() {
   print_header "MODO VIDEO — Video único (mejor calidad nativa)"
-  local url
-  url=$(ask "URL del video")
-  [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+  local url="${1:-}"
+  if [[ -z "$url" ]]; then
+    url=$(ask "URL del video")
+    [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+    warn_if_unexpected_type "$url" "video"
+  fi
 
   local outdir
   outdir=$(ask "Directorio de salida" "$OUTDIR")
@@ -722,9 +950,11 @@ mode_video() {
 # ──────────────────────────────────────────────────────────────────────
 mode_audio() {
   print_header "MODO AUDIO — Solo audio (mejor calidad original)"
-  local url
-  url=$(ask "URL del video")
-  [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+  local url="${1:-}"
+  if [[ -z "$url" ]]; then
+    url=$(ask "URL del video")
+    [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+  fi
 
   local outdir
   outdir=$(ask "Directorio de salida" "$OUTDIR")
@@ -762,9 +992,12 @@ mode_audio() {
 # ──────────────────────────────────────────────────────────────────────
 mode_playlist() {
   print_header "MODO PLAYLIST — Lista completa o rango"
-  local url
-  url=$(ask "URL de la playlist")
-  [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+  local url="${1:-}"
+  if [[ -z "$url" ]]; then
+    url=$(ask "URL de la playlist")
+    [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+    warn_if_unexpected_type "$url" "playlist"
+  fi
 
   local start end
   start=$(ask "Video inicial (1 = primero)" "1")
@@ -812,9 +1045,12 @@ mode_playlist() {
 # ──────────────────────────────────────────────────────────────────────
 mode_channel() {
   print_header "MODO CANAL — Canal completo (videos + shorts + lives)"
-  local url
-  url=$(ask "URL del canal (@handle o /c/ o /channel/)")
-  [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+  local url="${1:-}"
+  if [[ -z "$url" ]]; then
+    url=$(ask "URL del canal (@handle o /c/ o /channel/)")
+    [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+    warn_if_unexpected_type "$url" "channel"
+  fi
 
   local outdir
   outdir=$(ask "Directorio base de salida" "$OUTDIR")
@@ -851,9 +1087,11 @@ mode_channel() {
 # ──────────────────────────────────────────────────────────────────────
 mode_custom() {
   print_header "MODO CUSTOM — URL + flags manuales"
-  local url
-  url=$(ask "URL (video, playlist, canal, lo que sea)")
-  [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+  local url="${1:-}"
+  if [[ -z "$url" ]]; then
+    url=$(ask "URL (video, playlist, canal, lo que sea)")
+    [[ -z "$url" ]] && { warn "URL vacía"; return 1; }
+  fi
 
   # Leer flags extra como array (expansión segura)
   local -a extra_flags=()
@@ -1167,12 +1405,21 @@ NAVEGACIÓN
   Ctrl+C    Salir del programa
 
 MODOS
+  Detectar auto  Pega la URL y el CLI detecta tipo + plataforma, elige el
+                 modo y te pregunta lo que falte (rango, etc.)
   Video     Video único — mejor calidad nativa (contenedor original)
   Audio     Solo audio — mejor calidad original (sin reconversión)
   Playlist  Lista completa o rango N-M — carpeta con índice
   Canal     Canal completo (videos + shorts + lives) — por fecha
   Custom    URL + flags manuales de yt-dlp
   Cola      Gestionar múltiples descargas (añadir/listar/procesar)
+
+DETECCIÓN DE URL (sin conexión, instantáneo)
+  YouTube    playlist · video · video-en-playlist · short · live ·
+             canal (@handle, /c/, /channel/, /user/) · uploads
+  Otras      tiktok · twitter/x · instagram · facebook · vimeo · twitch ·
+             reddit · soundcloud · bandcamp · bilibili · dailymotion · …
+  Si la URL es un video DENTRO de una playlist, te pregunta cuál querés.
 
 DIAGNÓSTICO
   Test de conexión   Verifica YouTube + CDN de video real (googlevideo).
@@ -1219,6 +1466,7 @@ main_menu() {
 
     local choice
     choice=$(choose "Selecciona modo" \
+      "auto"     "🔍 Detectar automáticamente (pega la URL y elijo el modo)" \
       "video"    "Video único (mejor calidad nativa)" \
       "audio"    "Solo audio (mejor calidad original)" \
       "playlist" "Playlist completa o rango N-M" \
@@ -1231,6 +1479,7 @@ main_menu() {
       "exit"     "Salir")
 
     case "$choice" in
+      auto)     auto_detect_mode ;;
       video)    mode_video ;;
       audio)    mode_audio ;;
       playlist) mode_playlist ;;
