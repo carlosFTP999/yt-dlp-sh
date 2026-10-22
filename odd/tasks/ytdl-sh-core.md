@@ -80,7 +80,7 @@
 | T5 | S7 | inline | Dry-run flag (`-n`/`--dry-run`) | `feat(core): dry-run simulation` | ✅ Done (covered by T2) |
 | T6 | S8 | inline | Config dirs + files (config, history, archive, queue) | `feat(core): persistent config and history` | ✅ Done (commit f930a88) |
 | T7 | S1.6, S10 | inline | Queue básica (add/list/process sequential) + signals/trap | `feat(core): queue system and signal handling` | ✅ Done (commit 9742136) |
-| T8 | S1-S10 | inline | Integración end-to-end + smoke test 5 URLs | `test(core): e2e smoke tests` | ✅ Approved — Implementing |
+| T8 | S1-S10 | inline | Integración end-to-end + smoke test 5 URLs | `test(core): e2e smoke tests` | ✅ Done (commit 5b77ba7) — 30/30 tests pass |
 | T4 | S5 | inline | Validación pre-vuelo (deps, red, disco) | `feat(core): pre-flight validation` | ⏳ Pending |
 | T5 | S7 | inline | Dry-run flag (`-n`/`--dry-run`) | `feat(core): dry-run simulation` | ⏳ Pending |
 | T6 | S8 | inline | Config dirs + files (config, history, archive, queue) | `feat(core): persistent config and history` | ⏳ Pending |
@@ -135,6 +135,18 @@
 
 ### L15 — 2026-10-20 — T8 Aprobado (Usuario)
 > T8 aprobado: Harness smoke tests pure bash (sin framework). tests/smoke-test.sh + tests/lib/test-helpers.sh. 8 tests automáticos: config round-trip, JSONL build/get, queue persistence, format args per preset, template per mode, dry-run flag, preflight warnings, trap_cleanup. Test de descarga real opcional (--with-download) con video BaW_jenozKc (yt-dlp official test CC). Estado aislado XDG_CONFIG_HOME override a mktemp -d. Exit code = # fallos (CI-ready). Commit: test(core): e2e smoke tests.
+
+### L16 — 2026-10-20 — T8 Completado + 4 Bugs Reales Corregidos (Orchestrator)
+> Implementado y commiteado T8 (commit 5b77ba7): harness pure bash con 30 smoke tests, 30/30 pasan. Los tests REVELARON 4 bugs REALES de producción (no solo de tests): (1) `((x++))` con x=0 + `set -e` abortaba el script — rompía el menú principal (choose() al bajar con flecha), preflight_checks() en el primer warning, queue_process() en el primer item, queue_retry() y queue_clear(); (2) json_get_raw() truncaba objetos anidados en la primera coma → el rango de playlist {start,end} se parseaba solo {start → se perdía el end y se descargaba la playlist completa; (3) is_valid_json() contaba quotes sin respetar escapes → descartaba items de cola con quotes escapados; (4) json_get() no resolvía escapes. Todos corregidos + 30/30 tests pasan. Verificado en entorno: yt-dlp 2026.08.19, ffmpeg 7.1, node v24.22.0 + yt_dlp_ejs-0.8.0 (YouTube viable).
+
+### L17 — 2026-10-20 — Investigación: Detección de Plataforma (Orchestrator)
+> Medido en el entorno: `yt-dlp --simulate` tarda 5.3s (network round-trip) y su `extractor_key` es genérico ("Youtube" para video/short/playlist — NO distingue el tipo). `%(playlist_title)s` y `%(playlist_count)s` SOLO existen si es playlist (detector fiable pero lento). El parsing por patrón de URL en bash puro es instantáneo y offline. Conclusión: NO forzar plataforma (fricción + lista que se queda vieja + riesgo de error al elegir mal); usar detección automática por patrón para pre-seleccionar el modo, con override manual disponible. Propuesta como T9.
+
+### L18 — 2026-10-20 — Bugfix: Pre-flight con falsos positivos (Usuario reporta)
+> El usuario reporta al ejecutar el script: "⚠ YouTube NO accesible" y "⚠ googlevideo NO accesible — las descargas FALLARÁN". Diagnóstico medido: (1) `https://googlevideo.com` (apex) NO es un host de video real → devuelve http=000 exit 60 (certificado SSL inválido) → warning FALSO PERMANENTE; (2) `timeout 3` en el check de youtube.com es demasiado justo → 1 de 10 corridas pasó de 3s (0.88s típico) → warning FALSO TRANSITORIO. Verificado que el CDN real SÍ funciona: `yt-dlp -g` → host `rr2---sn-*.googlevideo.com`, range GET 100KB → **http=206 en 0.54s**. Corrección: eliminar el check del apex inexistente, timeout 10s + 1 reintento, diagnóstico por causa (DNS/timeout/SSL/HTTP), y test de conexión CDN real bajo demanda (usando la receta del propio usuario en guia-download-youtube.md:32). T9/T10 quedan para decisión posterior.
+
+### L19 — 2026-10-20 — Bugfix Completado + 2 Bugs Adicionales (Orchestrator)
+> Implementado y commiteado (commit 18ee713), 37/37 tests pasan. Fix del preflight: check de apex googlevideo ELIMINADO, timeout 10s + 1 reintento, `http_diagnose()` con causa por tipo de error, `check_cdn_reachable()` nuevo (resuelve host real con `yt-dlp -g` + range 100KB, sin descarga pesada), item "Test de conexión" en el menú principal, `check_disk_space()` con `df -Pk` (POSIX, era GNU-only) + `IFS=' '` local. **2 bugs adicionales encontrados durante el fix**: (1) el `IFS=$'\n\t'` global rompía silenciosamente el parseo de campos de `df` → el check de disco NUNCA midió nada; (2) **CRÍTICO**: con `set -euo pipefail`, `var=$(cmd_fallido)` aborta el script entero → todos los checks de red ABORTABAN en vez de avisar (el preflight moría en silencio). Ambos corregidos, con 5 tests de regresión nuevos + override `YT_CHECK_URL` para testear el camino de fallo. Verificado: preflight limpio, diagnóstico por causa correcto, CDN real http=206.
 
 ---
 
