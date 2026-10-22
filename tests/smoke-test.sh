@@ -692,6 +692,65 @@ MOCK
   assert_eq "$out" "opcion" || return 1
 }
 
+# ══════════════════════════════════════════════════════════════════════
+# ESC en todas partes — debe cancelar y volver
+# ══════════════════════════════════════════════════════════════════════
+
+t_ask_esc_cancels() {
+  local rc=0 out
+  out=$(printf '\033' | ask "URL" 2>/dev/null) || rc=$?
+  assert_eq "$rc" "1" || return 1
+  assert_eq "$out" "" || return 1
+}
+
+t_ask_esc_uses_default_when_empty() {
+  # Enter vacío con default → devuelve el default
+  local out
+  out=$(printf '\n' | ask "Directorio" "/tmp/x" 2>/dev/null) || true
+  assert_eq "$out" "/tmp/x" || return 1
+}
+
+t_ask_accepts_text() {
+  local out
+  out=$(printf 'hola\n' | ask "URL" 2>/dev/null) || true
+  assert_eq "$out" "hola" || return 1
+}
+
+t_ask_backspace_edits() {
+  local out
+  # "abc" + backspace + "d" + Enter → "abd" (backspace borra la 'c')
+  out=$(printf 'abc\177d\n' | ask "URL" 2>/dev/null) || true
+  assert_eq "$out" "abd" || return 1
+}
+
+t_ask_ignores_arrow_sequences() {
+  # Las flechas dentro de un input de texto no deben Romperlo
+  local out
+  out=$(printf 'ab\033[Bc\n' | ask "URL" 2>/dev/null) || true
+  assert_eq "$out" "abc" || return 1
+}
+
+t_confirm_esc_cancels() {
+  local rc=0
+  printf '\033' | confirm "¿Descargar?" >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "1" || return 1
+}
+
+t_confirm_yes_and_no() {
+  local rc=0
+  printf 'y\n' | confirm "¿Descargar?" >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "0" || return 1
+  rc=0
+  printf 'n\n' | confirm "¿Descargar?" >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "1" || return 1
+}
+
+t_confirm_default_on_empty() {
+  local rc=0
+  printf '\n' | confirm "¿Descargar?" "y" >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "0" || return 1
+}
+
 # 22g. REGRESIÓN CRÍTICA: un check de red fallido NO debe abortar el script
 # Con set -euo pipefail, `var=$(cmd_fallido)` aborta el script entero.
 # Este test reproduce el contexto real (set -e activo) y exige que el
@@ -929,6 +988,14 @@ run_test_group() {
   run_t "ui: ESC cancela" t_choose_esc_cancels
   run_t "ui: límites del menú" t_choose_stops_at_boundaries
   run_t "ui: el valor NO trae escapes" t_choose_value_is_clean
+  run_t "esc: ask cancela" t_ask_esc_cancels
+  run_t "esc: ask usa default vacío" t_ask_esc_uses_default_when_empty
+  run_t "esc: ask acepta texto" t_ask_accepts_text
+  run_t "esc: backspace edita" t_ask_backspace_edits
+  run_t "esc: flechas no rompen el texto" t_ask_ignores_arrow_sequences
+  run_t "esc: confirm cancela" t_confirm_esc_cancels
+  run_t "esc: confirm sí/no" t_confirm_yes_and_no
+  run_t "esc: confirm default vacío" t_confirm_default_on_empty
 
   reset_state
   run_t "cache: round-trip" t_cdn_cache_roundtrip
