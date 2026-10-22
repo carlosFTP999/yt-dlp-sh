@@ -1,0 +1,21 @@
+# Harness de desarrollo (no es parte del proyecto)
+.atl/
+
+# Guía personal con datos del entorno (proxy corporativo, rutas locales)
+guia-download-youtube.md
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Editores
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Logs y temporales
+*.log
+*.part
+*.ytdl
